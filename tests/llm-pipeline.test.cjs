@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { generate } = require('../services/api/src/agent/taskAgent.cjs');
 const { assistCustomer } = require('../services/api/src/agent/customerAgent.cjs');
-const { requestJson, planContent, reviewCopy } = require('../services/api/src/clients/llmClient.cjs');
+const { requestJson, planContent, reviewCopy, generateCustomer } = require('../services/api/src/clients/llmClient.cjs');
 const task = { audience: '学生', scenario: '学习', goal: '到店', platform: 'xiaohongshu', model: 'MateBook 14 酷睿 Ultra', history: [{ role: 'assistant', content: '上一轮成稿' }, { role: 'user', content: '缩短一点' }] };
 const meta = { model: 'test-model', duration_ms: 2, usage: { total_tokens: 10 } };
 const plan = { value: { audience: '学生', needs: ['学习'], concerns: [], buying_stage: '比较', summary: '用于学习', retrieval_queries: ['学习 场景'] }, meta };
@@ -21,6 +21,28 @@ test('successful review accepts explicit empty strings as empty lists without by
   const accepted = await reviewCopy(context, provider(true));
   assert.deepEqual(accepted.value.revision_instructions, []);
   await assert.rejects(reviewCopy(context, provider(false)), { code: 'LLM_INVALID_SCHEMA' });
+});
+
+test('customer output normalizes string follow-up days and filters unselected dates', async () => {
+  const value = { questions: [], rationale: '按需求确认', sales_script: { opening: '您好', recommendation: '先试用', close: '欢迎到店' }, objection_responses: [], follow_up_plan: [1, 3, 7].map((day) => ({ day: String(day), objective: '确认需求', action: '核对软件', message_draft: '您常用什么软件？' })) };
+  const result = await generateCustomer({ task: { follow_up_days: [1, 3] }, analysis: {}, evidence: [], ambiguous_model: false, model_candidates: [] }, { fetch: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(value) } }] }) }) });
+  assert.deepEqual(result.value.follow_up_plan.map((item) => item.day), [1, 3]);
+});
+
+test('customer output gets one schema repair with concrete field feedback', async () => {
+  let calls = 0;
+  const complete = { questions: [], rationale: '根据图书馆学习场景，先核对软件和预算。', sales_script: { opening: '您主要用来写论文，对吗？', recommendation: '先带上常用文件试用。', close: '欢迎到店体验。' }, objection_responses: [], follow_up_plan: [1, 3, 7].map((day) => ({ day, objective: '确认需求', action: '核对软件', message_draft: '您常用哪些软件？' })) };
+  const fetch = async (_url, request) => {
+    calls++;
+    const sent = JSON.parse(request.body).messages[1].content;
+    if (calls === 2) assert.match(sent, /follow_up_plan 缺少所选日期/);
+    const reply = calls === 1 ? { ...complete, follow_up_plan: complete.follow_up_plan.slice(0, 2) } : complete;
+    return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(reply) } }] }) };
+  };
+  const result = await generateCustomer({ task: { follow_up_days: [1, 3, 7] }, analysis: {}, evidence: [], ambiguous_model: false, model_candidates: [] }, { fetch });
+  assert.equal(calls, 2);
+  assert.equal(result.meta.attempts, 2);
+  assert.equal(result.value.follow_up_plan.length, 3);
 });
 
 test('missing evidence, conflicting facts and missing images stop article delivery', async () => {

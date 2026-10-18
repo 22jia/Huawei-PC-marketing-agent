@@ -121,10 +121,33 @@ async function generateReply({ task, analysis, evidence, runtime }, options = {}
   if (typeof result.value.reply !== 'string' || !result.value.reply.trim()) throw failure('LLM_INVALID_SCHEMA', '模型回复结构错误，请重试。');
   return { reply: result.value.reply, meta: result.meta };
 }
-async function generateCustomer({ task, analysis, evidence, ambiguous_model, model_candidates }, options = {}) {
-  const result = await requestJson(`${GROUNDING} 你是门店成交辅助顾问。根据客户原话、分析和证据输出方案。版本未确认必须追问，不能确定推荐。话术面向客户，行动建议面向店员，跟进消息不能复制行动建议。不承诺成交或自动联系客户。返回 {questions:string[],rationale:string,sales_script:{opening:string,recommendation:string,close:string},objection_responses:[{objection:string,response:string}],follow_up_plan:[{day:number,objective:string,action:string,message_draft:string}]}。仅输出task.follow_up_days指定日期的跟进计划。`, { task, analysis, evidence: evidenceContext(evidence), ambiguous_model, model_candidates }, options);
-  const v = result.value;
-  if (!Array.isArray(v.questions) || v.questions.some((q) => typeof q !== 'string') || typeof v.rationale !== 'string' || !v.sales_script || ['opening', 'recommendation', 'close'].some((k) => typeof v.sales_script[k] !== 'string') || !Array.isArray(v.objection_responses) || v.objection_responses.some((x) => !x || typeof x.objection !== 'string' || typeof x.response !== 'string') || !Array.isArray(v.follow_up_plan) || v.follow_up_plan.some((x) => !x || !task.follow_up_days.includes(x.day) || ['objective', 'action', 'message_draft'].some((k) => typeof x[k] !== 'string')) || v.follow_up_plan.length !== task.follow_up_days.length || new Set(v.follow_up_plan.map((x) => x.day)).size !== task.follow_up_days.length) throw failure('LLM_INVALID_SCHEMA', '模型成交辅助结构错误，请重试。');
+function customerSchemaIssues(value, days) {
+  const issues = [];
+  if (!Array.isArray(value.questions) || value.questions.some((q) => typeof q !== 'string')) issues.push('questions 必须是字符串数组');
+  if (typeof value.rationale !== 'string' || !value.rationale.trim()) issues.push('rationale 必须是非空字符串');
+  if (!value.sales_script || typeof value.sales_script !== 'object' || ['opening', 'recommendation', 'close'].some((k) => typeof value.sales_script[k] !== 'string' || !value.sales_script[k].trim())) issues.push('sales_script 必须包含非空 opening、recommendation、close 字符串');
+  if (!Array.isArray(value.objection_responses) || value.objection_responses.some((x) => !x || typeof x.objection !== 'string' || typeof x.response !== 'string')) issues.push('objection_responses 必须是 objection/response 字符串对象数组');
+  if (!Array.isArray(value.follow_up_plan)) issues.push('follow_up_plan 必须是数组');
+  else {
+    const normalized = value.follow_up_plan.map((item) => Number(item?.day));
+    if (normalized.some((day) => !Number.isInteger(day) || ![1, 3, 7].includes(day))) issues.push('跟进 day 必须为数字 1、3 或 7');
+    if (new Set(normalized).size !== normalized.length) issues.push('跟进日期不能重复');
+    if (days.some((day) => !normalized.includes(day))) issues.push(`follow_up_plan 缺少所选日期 ${days.filter((day) => !normalized.includes(day)).join(', ')}`);
+    if (value.follow_up_plan.some((item) => !item || ['objective', 'action', 'message_draft'].some((k) => typeof item[k] !== 'string' || !item[k].trim()))) issues.push('每个跟进项必须包含非空 objective、action、message_draft 字符串');
+  }
+  return issues;
+}
+
+async function generateCustomer({ task, analysis, evidence, ambiguous_model, model_candidates, format_feedback, previous_draft }, options = {}) {
+  const days = [...new Set((task.follow_up_days || []).map(Number).filter((day) => [1, 3, 7].includes(day)))];
+  const result = await requestJson(`${GROUNDING} 你是门店成交辅助顾问。根据客户原话、需求分析和产品证据输出可直接使用的方案。版本未确认时必须追问，不得确定推荐。话术面向客户，行动建议面向店员，跟进消息不能复制行动建议。不承诺成交或自动联系客户。${format_feedback ? `上一版结构错误：${format_feedback.join('；')}。请根据这些错误修复上一版，不要省略字段。上一版：${JSON.stringify(previous_draft)}` : ''}follow_up_plan仅输出task.follow_up_days指定日期；没有选日期时输出空数组。严格按此JSON形状返回，数组为空用[]：{"questions":["确认具体软件"]或[],"rationale":"需求解释","sales_script":{"opening":"开场话术","recommendation":"方案话术","close":"邀约话术"},"objection_responses":[{"objection":"顾虑","response":"回应"}],"follow_up_plan":[{"day":1,"objective":"目标","action":"店员动作","message_draft":"消息草稿"}]}。`, { task, analysis, evidence: evidenceContext(evidence), ambiguous_model, model_candidates, format_feedback }, options);
+  const value = result.value;
+  const issues = customerSchemaIssues(value, days);
+  if (issues.length) {
+    if (!options.schemaRetry) return combineAttempts(result, await generateCustomer({ task, analysis, evidence, ambiguous_model, model_candidates, format_feedback: issues, previous_draft: value }, { ...options, schemaRetry: true }));
+    throw failure('LLM_INVALID_SCHEMA', `成交辅助模型两次返回的结构都不完整：${issues.join('；')}。`);
+  }
+  value.follow_up_plan = value.follow_up_plan.map((item) => ({ ...item, day: Number(item.day) })).filter((item) => days.includes(item.day));
   return result;
 }
 module.exports = { isConfigured, requestJson, planTask, planContent, reviewCopy, generateCopy, generateReply, generateCustomer, evidenceContext, failure };
