@@ -94,7 +94,7 @@ function LegacyMarketingWorkbench({ messageApi }) {
     <Col xs={24} lg={16}>
       <Card title={<Space><FileTextOutlined />生成结果</Space>} className="panel-card result-card" extra={result?.content && <Button icon={<CopyOutlined />} onClick={copyBody}>复制内容</Button>}>
         {!result && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="填写左侧任务后开始生成" className="empty-state" />}
-        {result?.status === 'needs_clarification' && <Alert type="warning" showIcon message="还需要补充信息" description={<Space direction="vertical">{result.task?.questions?.map((item) => <Text key={item.field}>{item.question}</Text>)}</Space>} />}
+        {result?.status === 'needs_clarification' && <Alert type="warning" showIcon message={result.result_type === 'product_selection' ? '场景匹配的产品建议' : '还需要补充信息'} description={<Space direction="vertical"><Text>{result.reply || result.task?.questions?.map((item) => item.question).join('；')}</Text></Space>} />}
         {result?.content && <>
           <div className="result-meta"><Tag color={result.validation?.status === 'pass' ? 'success' : 'warning'} icon={<CheckCircleOutlined />}>{result.validation?.status === 'pass' ? '核验通过' : '需要人工确认'}</Tag><Text type="secondary">{result.request_id}</Text></div>
           <Title level={3}>{result.content.title}</Title>
