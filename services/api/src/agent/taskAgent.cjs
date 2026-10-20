@@ -3,6 +3,7 @@ const { planTask, planContent, reviewCopy, generateCopy, generateReply, failure 
 const { creativeAssets, resolveImagePlan } = require('../services/creativeAssets.cjs');
 const { styleReferences } = require('../services/styleReferences.cjs');
 const { collectEvidence, assertGrounded, pipelineMeta } = require('./agentRuntime.cjs');
+const { recommendProductsForScenario } = require('../services/scenarioProductSearch.cjs');
 
 const PLATFORMS = require('./platformStrategies.cjs');
 
@@ -66,6 +67,23 @@ async function generate(input, options = {}) {
   if (task.need_clarification && !task.history.some((m) => m.role === 'user')) return { status: 'needs_clarification', task };
   const planned = await (options.planTask || planTask)(task);
   task = analyzeTask({ ...task, ...(planned.value.task_updates || {}) });
+  if (['generate', 'revise'].includes(planned.value.intent) && !task.model && task.scenario) {
+    const candidates = (options.recommendProductsForScenario || recommendProductsForScenario)(task.scenario, { limit: 3 });
+    if (candidates.length) {
+      const choices = candidates.map((product, index) => [
+        `${index + 1}. ${product.name}`,
+        `产品定位：${product.positioning}`,
+        `推荐理由：${product.reason || '暂无可匹配的具体适用任务，请核对产品资料。'}`,
+      ].join('\n')).join('\n\n');
+      return {
+        status: 'needs_clarification',
+        result_type: 'product_selection',
+        generation_mode: 'not_generated',
+        reply: `根据“${task.scenario}”，以下产品与场景较匹配：\n\n${choices}\n\n请回复序号或型号，确认后我再按该型号生成内容。`,
+        task: { ...task, scenario_candidates: candidates, questions: [{ field: 'model', question: '请从推荐型号中选择一款。', options: candidates.map((product) => product.name) }] },
+      };
+    }
+  }
   if (planned.value.intent === 'answer') {
     const retrieved = planned.value.needs_evidence ? await collectEvidence(task, planned.value, options) : { evidence: [] };
     const answered = await (options.generateReply || generateReply)({ task, analysis: planned.value, evidence: retrieved.evidence, runtime: { model: planned.meta.model, ambiguous_model: Boolean(retrieved.ambiguous_model), model_candidates: retrieved.model_candidates || [] } });
