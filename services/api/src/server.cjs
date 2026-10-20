@@ -9,6 +9,7 @@ const localKnowledgeBrowser = require('./services/localKnowledgeBrowser.cjs');
 const ticketStore = require('./services/ticketStore.cjs');
 const productSpotlight = require('./services/productSpotlight.cjs');
 const platformStrategies = require('./agent/platformStrategies.cjs');
+const { resolveGeneratedImage, MIME_TYPES } = require('./agent/imageAgent/storage.cjs');
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -63,6 +64,16 @@ async function route(request, response) {
       const type = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[path.extname(imagePath).toLowerCase()];
       response.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=3600' });
       return fs.createReadStream(imagePath).pipe(response);
+    }
+    const generatedAssetMatch = url.pathname.match(/^\/api\/v1\/generated-assets\/([^/]+)$/);
+    if (method === 'GET' && generatedAssetMatch) {
+      const generatedPath = resolveGeneratedImage(generatedAssetMatch[1]);
+      if (!generatedPath) return sendJson(response, 404, { status: 'error', code: 'GENERATED_ASSET_NOT_FOUND', message: '生成图片不存在', request_id: id });
+      const type = MIME_TYPES[path.extname(generatedPath).slice(1).toLowerCase()] || 'application/octet-stream';
+      response.writeHead(200, { 'Content-Type': type, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=86400, immutable' });
+      const stream = fs.createReadStream(generatedPath);
+      stream.on('error', () => response.destroy());
+      return stream.pipe(response);
     }
     const ticketMatch = url.pathname.match(/^\/api\/v1\/tickets\/([^/]+)(?:\/follow-ups)?$/);
     const isTicketFollowUp = /^\/api\/v1\/tickets\/[^/]+\/follow-ups$/.test(url.pathname);
