@@ -159,8 +159,14 @@ async function route(request, response) {
       });
     }
     if (url.pathname === '/api/v1/generate') {
-      const result = await generate(body);
-      return sendJson(response, result.status === 'needs_clarification' ? 200 : 200, { request_id: id, ...result });
+      const controller = new AbortController();
+      const disconnect = () => { if (!response.writableEnded) controller.abort(); };
+      response.on('close', disconnect);
+      try {
+        const result = await generate(body, { signal: controller.signal });
+        if (!controller.signal.aborted) return sendJson(response, 200, { request_id: id, ...result });
+        return;
+      } finally { response.removeListener('close', disconnect); }
     }
     if (url.pathname === '/api/v1/export') {
       if (!body.content || !body.format) return sendJson(response, 400, { status: 'error', code: 'MISSING_REQUIRED_FIELD', message: '缺少 content 或 format 字段', request_id: id });

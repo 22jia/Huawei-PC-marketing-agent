@@ -4,9 +4,11 @@
 
 ## 当前接入状态
 
-本分支实现图片模块与生成资源读取路由。核对当前仓库后发现：`taskAgent.cjs` 尚未调用本模块，`tests/progress-stream.test.cjs` 也尚不存在；以下进度事件、输出校验与官方图回退属于主流程负责人（Harness）待接入事项，不能据此宣称公共生成接口已跑通。
+本分支已接入 PC 场景营销工作台现有 `/api/v1/generate`。用户沿用原有表单和“开始创作”按钮，布局不变。主流程完成事实检索、图文策划、文案生成和审核后调用图片模块。默认只生成一张策划选中的主视觉（优先封面），其他位置保留官方图；`IMAGE_MAX_IMAGES=1..6` 可调整上限。未配置图片凭据或 `IMAGE_PROVIDER=none` 时沿用官方配图，不发付费请求。
 
-Harness 应在产品事实检索和图文策划之后调用 `services/api/src/agent/imageAgent/index.cjs` 导出的 `generateCreativeImages(input, options)`，调用期间发出 `imageGeneration` 进度事件。模块失败或输出不符合契约时，主流程记录失败阶段并退回策划选中的官方图。若没有可回退的有效图片，停止图文交付。本分支不改写主流程、审核策略或前端 URL 规则。
+`integration.cjs` 校验成功状态、数量、型号、输入素材关联、官方来源、本地 URL 和策划位置；异常或非法输出回退本次已核验的官方图，记录 `llm.stages` 中 `imageGeneration` 的成功/失败状态。取消请求会传递到图片模块，不作为普通失败回退。当前 API 仍是一次性 JSON 响应，阶段信息在完成后显示，尚无实时进度流；文字阶段取消仍沿用原有行为。
+
+共享文件变动由本次用户明确要求授权：`taskAgent.cjs` 接调用与回退，`server.cjs` 传断开信号，`MarkdownContent.jsx` 只额外允许严格的本地生成图片地址，`creativeArticle.js` 和 `ModelRunStatus.jsx` 展示合成来源与失败状态。未改变表单、布局、文案事实检索或审核策略。
 
 ## 输入契约
 
@@ -84,7 +86,7 @@ generateCreativeImages({
 node --test tests/image-agent.test.cjs tests/llm-pipeline.test.cjs tests/progress-stream.test.cjs
 ```
 
-并验证生成文件能通过本地 API 路由读取，未配置图片服务时官方图回退正常，取消请求会停止供应商任务，前端拒绝外部图片 URL。真实模型联调应作为单独的手动验证，不放进常规 CI。
+并验证生成文件能通过本地 API 路由读取，未配置图片服务时官方图回退正常，取消请求会停止本地图片等待（供应商任务是否停止需另行确认），前端拒绝外部图片 URL。真实模型联调应作为单独的手动验证，不放进常规 CI。
 
 ## 合入清单
 
@@ -135,6 +137,8 @@ LLM_API_KEY=mock-test-key LLM_BASE_URL=https://example.invalid/v1 LLM_MODEL=mock
 - `services/api/package.json`：声明服务端确定性合成依赖，避免把图像处理放到浏览器。
 - `Dockerfile`：构建阶段安装服务端依赖，使现有部署具备 `sharp`；首次成功安装并生成锁文件后应提交锁文件并将部署安装切换为 `npm ci`。
 
-### Harness 待验收
+### 工作台待验收
 
-主流程仍需实现/验证：调用图片模块、取消信号传递、输出 schema/型号/来源/数量检查、进度事件、失败记录和官方图回退；前端需要确认允许 `/api/v1/generated-assets/` 且拒绝外部地址。完成依赖安装、主流程接入与真实模型手动联调后，才能宣称部署端到端跑通。抠图与更自然的场景融合另行迭代。
+主流程调用、回退、取消传递和前端地址放行已实现，相关 mock 检查见 `tests/image-agent-integration.test.cjs`。仍需在本机安装正式依赖并配置图片 Key，重启 API 后通过工作台实际创作验证，包括生成资源 GET。真实 API 成果存在独立样例中，不等于工作台已经端到端验证。无实时进度流，取消不能保证供应商停止计费；自动抠图与自然场景融合仍待迭代。
+
+本机工作台的配置来自根目录 `.env`，而不是 `.env.image-playground`。配置 `CREDIT_MEDIA_API_KEY` 或 `IMAGE_API_KEY`、`IMAGE_MODEL=gpt-image-2`、`IMAGE_TIMEOUT_MS=180000`、`IMAGE_MAX_IMAGES=1`。不得自动将 `LLM_API_KEY` 当作图片 Key。改配置后重启 API；浏览器只读取同源生成资源。

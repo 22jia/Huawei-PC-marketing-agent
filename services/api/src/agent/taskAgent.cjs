@@ -4,6 +4,7 @@ const { creativeAssets, resolveImagePlan } = require('../services/creativeAssets
 const { styleReferences } = require('../services/styleReferences.cjs');
 const { collectEvidence, assertGrounded, pipelineMeta } = require('./agentRuntime.cjs');
 const { recommendProductsForScenario } = require('../services/scenarioProductSearch.cjs');
+const { integrateImages } = require('./imageAgent/integration.cjs');
 
 const PLATFORMS = require('./platformStrategies.cjs');
 
@@ -110,7 +111,7 @@ async function generate(input, options = {}) {
     validation: { status: 'fail', checks: { facts: 'fail' }, blocking_issues: strategy.value.conflicts.map((c) => c.reason), pending_confirmation: strategy.value.conflicts.map((c) => c.reason) },
     llm: { status: 'needs_confirmation', stages: [{ stage: 'analysis', ...planned.meta }, { stage: 'strategy', ...strategy.meta }] },
   };
-  const images = resolveImagePlan(strategy.value.image_plan, assets, task.image_count);
+  let images = resolveImagePlan(strategy.value.image_plan, assets, task.image_count);
   if (!images.length) return { status: 'needs_confirmation', result_type: 'blocked', task, generation_mode: 'not_generated', reply: `没有可用的同型号配图，暂不能交付图文软文。${strategy.value.asset_gap || '请补充该型号的图片与图片索引。'}`, validation: { status: 'fail', checks: { images: 'fail' }, blocking_issues: ['缺少同型号配图'] } };
   assertGrounded(images.map(({ caption }) => caption).join('\n'), usableEvidence);
   const context = { task, evidence: usableEvidence, analysis: planned.value, platform, strategy: strategy.value, images, history: task.history };
@@ -151,6 +152,9 @@ async function generate(input, options = {}) {
   }
   const content = generated.content;
   assertGrounded(content, usableEvidence);
+  const imageResult = await integrateImages({ task, evidence: usableEvidence, assets, platform, strategy: strategy.value }, images, options);
+  images = imageResult.images;
+  if (imageResult.stage) stages.push(imageResult.stage);
   const generation_mode = 'llm';
   const validation = validate(task, retrieved.evidence, content);
   validation.checks.images = images.every((i) => i.model && i.source_url) ? 'metadata_matched' : 'warning';
@@ -177,7 +181,7 @@ async function generate(input, options = {}) {
     evidence_meta: { matched_count: retrieved.matched_count, unavailable_count: retrieved.evidence.filter((item) => item.confidence === 'unavailable').length },
     images,
     validation,
-    warnings: [...validation.blocking_issues, ...(validation.warnings || []), ...(retrieved.retrieval_warning ? [retrieved.retrieval_warning] : []), ...(strategy.value.asset_gap ? [strategy.value.asset_gap] : []), ...(images.length ? ['配图按同型号资料索引匹配，尚未视觉核验；发布前核对画面、版本和使用权。'] : [])],
+    warnings: [...validation.blocking_issues, ...(validation.warnings || []), ...imageResult.warnings, ...(retrieved.retrieval_warning ? [retrieved.retrieval_warning] : []), ...(strategy.value.asset_gap ? [strategy.value.asset_gap] : []), ...(images.length ? ['配图按同型号资料索引匹配，尚未视觉核验；发布前核对画面、版本和使用权。'] : [])],
     editable: true,
   };
 }
