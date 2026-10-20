@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>生图试验台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><header><div><h1>生图试验台</h1><p>先看图片效果，再接团队的创作流程。</p></div><span class="isolation">独立本地测试</span></header>
+<main><section class="controls" aria-label="生成设置"><form id="form">
+<label for="mode">你想测试什么</label><select id="mode"><option value="demo">离线演示 · 不消耗额度</option><option value="direct">直接生图 · 真实 API</option><option value="product">官方产品图合成 · 子 Agent</option></select><p class="hint" id="mode-hint"></p>
+<label for="model">生图模型</label><select id="model"><option>gpt-image-2</option></select>
+<div id="product-controls" hidden><label for="asset">官方素材</label><select id="asset"><option value="">正在读取素材…</option></select><img id="source" alt="选中的官方产品素材" hidden></div>
+<label for="prompt">画面描述</label><textarea id="prompt" rows="7" maxlength="4000" required>清晨的大学图书馆，窗边木质书桌，柔和自然光，安静真实的摄影风格。桌面留出摆放产品的空间，不出现文字、商标、人物或电子产品。</textarea>
+<p class="hint">每次生成 1 张，固定为正方形。真实生成会使用黑客松额度。</p>
+<div class="actions"><button id="generate" type="submit">运行离线演示</button><button id="cancel" type="button" hidden>停止等待</button></div>
+<p id="environment" class="environment" role="status">正在检查本地配置…</p>
+<details><summary>第一次使用：如何配置 Key</summary><p>在仓库根目录创建 <code>.env.image-playground</code>，写入：</p><pre>CREDIT_MEDIA_API_KEY=你的黑客松Key
+IMAGE_TIMEOUT_MS=120000</pre><p>保存后重启测试服务，再选择真实 API。不要将 Key 填到画面描述中。</p><p>产品合成还需要在终端运行：</p><pre>npm install --prefix services/api</pre><p>不透明官方图目前以整张卡片合成；自动抠图尚未接入。</p></details>
+</form></section>
+<section class="preview" aria-label="生成结果"><div class="preview-heading"><h2>出图预览</h2><a id="download" hidden download>保存图片</a></div><div class="canvas"><div id="empty"><span class="placeholder" aria-hidden="true">＋</span><p>描述你想看到的画面</p><small>在左侧选择模式，点击生成后查看结果。</small></div><img id="result" alt="本次生成结果" hidden></div><p id="status" role="status" aria-live="polite">还没有生成图片。</p><ul id="warnings"></ul><p class="footnote">这里测试图片模块，不会运行团队文案生成、客户助手或共享前端。</p></section></main></body></html>
