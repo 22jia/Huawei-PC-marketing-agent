@@ -153,6 +153,23 @@ test('an unrelated reply does not silently choose a product version', async () =
   });
   assert.equal(r.status, 'needs_clarification');
 });
+test('text request timeout can be configured and rejects unbounded values before calling provider', async () => {
+  const previous = process.env.LLM_TIMEOUT_MS;
+  try {
+    process.env.LLM_TIMEOUT_MS = '180000';
+    await requestJson('test', {}, { fetch: async (_url, request) => {
+      assert.equal(request.signal.aborted, false);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }) };
+    } });
+    for (const timeoutMs of [0, -1, 300001, NaN]) {
+      await assert.rejects(requestJson('test', {}, { timeoutMs, fetch: async () => assert.fail('must not call provider') }), { code: 'LLM_INVALID_CONFIG' });
+    }
+  } finally {
+    if (previous === undefined) delete process.env.LLM_TIMEOUT_MS;
+    else process.env.LLM_TIMEOUT_MS = previous;
+  }
+});
+
 test('HTTP and invalid JSON responses become safe diagnostic errors', async () => {
   await assert.rejects(requestJson('test', {}, { fetch: async () => ({ ok: false, status: 401 }) }), { code: 'LLM_HTTP_ERROR' });
   await assert.rejects(requestJson('test', {}, { fetch: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'not json' } }] }) }) }), { code: 'LLM_INVALID_JSON' });
