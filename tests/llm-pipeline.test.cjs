@@ -1,4 +1,6 @@
 const test = require('node:test');
+// Keep copy-only tests independent of local media credentials and paid providers.
+process.env.IMAGE_PROVIDER = 'none';
 const assert = require('node:assert/strict');
 const { generate } = require('../services/api/src/agent/taskAgent.cjs');
 const { assistCustomer } = require('../services/api/src/agent/customerAgent.cjs');
@@ -76,6 +78,30 @@ test('OLED and colour gamut alone cannot support eye health promises', async () 
   const { assertGrounded } = require('../services/api/src/agent/agentRuntime.cjs');
   assert.throws(() => assertGrounded('OLED屏幕保护你的眼睛，长时间使用不易疲劳。', [{ content: 'OLED屏幕，100% sRGB色域', source_status: 'local_snapshot' }]), { code: 'UNSUPPORTED_CLAIM' });
   assert.throws(() => assertGrounded('让你不再有视觉负担。', [{ content: 'OLED屏幕', source_status: 'local_snapshot' }]), { code: 'UNSUPPORTED_CLAIM' });
+});
+
+test('selected strategy facts limit which real specifications may enter the draft', async () => {
+  const { assertGrounded } = require('../services/api/src/agent/agentRuntime.cjs');
+  const docs = [{ content: '14.2 英寸\nOLED（抗反射屏）\n屏幕比例\n3:2\n分辨率\n2880 × 1920，243 PPI', source_path: 'P1-product/产品事实.md', source_status: 'local_snapshot' }];
+  const selected = [{ fact: '14.2 英寸', quote: '14.2 英寸' }];
+  assert.doesNotThrow(() => assertGrounded('屏幕尺寸为14.2英寸。', docs, selected));
+  assert.throws(() => assertGrounded('14.2英寸OLED，比例3:2，分辨率2880 × 1920。', docs, selected), { code: 'UNSUPPORTED_CLAIM' });
+  assert.throws(() => assertGrounded('14.2英寸OLED。', docs, [{ fact: '14.2英寸 OLED', quote: '14.2 英寸' }]), { code: 'UNSUPPORTED_CLAIM' });
+});
+
+test('unselected but real display specifications trigger a grounded rewrite', async () => {
+  let generations = 0;
+  const selectedStrategy = { ...editorialOptions, planContent: async () => ({ value: { angle: '屏幕选购', reader_tension: '核对需求', platform_reason: '具体场景', outline: ['体验'], evidence_ids: ['E1'], fact_points: [{ fact: '屏幕尺寸为14.2英寸', evidence_id: 'E1', quote: '14.2 英寸' }], conflicts: [], image_plan: [{ asset_id: 'test-image', placement: 'cover', after_paragraph: 0, caption: '官方产品图', purpose: '封面' }], asset_gap: '' }, meta }) };
+  const r = await generate(task, { ...options, ...selectedStrategy,
+    generateCopy: async ({ feedback }) => {
+      generations++;
+      if (generations === 2) assert.match(feedback.join(' '), /fact_points/);
+      return { content: { title: '屏幕选购', body: generations === 1 ? '14.2英寸OLED，比例3:2，分辨率2880 × 1920。' : '屏幕尺寸为14.2英寸。', hashtags: [], cta: '带上课件到店体验' }, meta };
+    },
+  });
+  assert.equal(generations, 2);
+  assert.equal(r.editorial_review.revision_count, 1);
+  assert.doesNotMatch(r.content.body, /OLED|3:2|2880/);
 });
 
 test('unsupported health copy is automatically rewritten with feedback before delivery', async () => {

@@ -133,13 +133,13 @@ async function generate(input, options = {}) {
     stages.push({ stage: attempt ? 'revision' : 'generation', ...generated.meta });
     revision_count = attempt;
     try {
-      assertGrounded(generated.content, usableEvidence);
+      assertGrounded(generated.content, usableEvidence, strategy.value.fact_points);
     } catch (error) {
       if (!['UNSUPPORTED_CLAIM', 'UNVERIFIED_PRICE'].includes(error.code)) throw error;
       stages.push({ stage: 'grounding', status: 'failed', code: error.code });
       repair_history.push({ attempt: attempt + 1, source: 'grounding', code: error.code, issues: [error.message] });
       if (attempt === 2) throw failure(error.code, '已根据事实核验意见自动修改两轮，仍存在无依据的产品表述，暂未交付。');
-      feedback = [error.message, '删除或改写无证据表述，不用近义词保留同一承诺。不能从OLED、色域推导保护眼睛、不易疲劳或健康效果。缺少参数、价格或效果依据时省略该卖点，改为具体选购建议，仍需完整输出标题、导语、正文及行动邀请。'];
+      feedback = [error.message, '产品规格只能使用本次strategy.fact_points明确选中的事实及其逐字引文；不要从完整知识库、常识或历史消息补充本稿未选用的参数。遇到未选入清单的比例、分辨率、PPI、屏幕类型、尺寸或其他参数，整句删除，或改成不声称产品能力的现场核验建议。不能用近义词保留同一承诺，也不能从OLED或色域推导护眼、疲劳改善等效果。缺少依据时省略该卖点，仍需完整输出标题、导语、正文及行动邀请。'];
       continue;
     }
     review = await inspect(generated.content);
@@ -147,11 +147,14 @@ async function generate(input, options = {}) {
     if (review.value.passed) break;
     editorialFailures++;
     repair_history.push({ attempt: attempt + 1, source: 'editorial', issues: review.value.issues });
-    if (attempt === 2 || editorialFailures >= 2) throw failure('CONTENT_REVIEW_FAILED', `自动修稿后仍未通过审稿：${review.value.issues.join('；')}。`);
-    feedback = review.value.revision_instructions;
+    if (attempt === 2 || editorialFailures >= 2) throw failure('CONTENT_REVIEW_FAILED', '文案自动修订后仍未通过事实与内容审核，暂未生成图片。请调整需求后重试。');
+    feedback = [...review.value.revision_instructions];
+    if (review.value.issues.some((issue) => /事实|证据|参数|规格|功能|卖点/.test(issue))) {
+      feedback.push('产品规格只能使用本次strategy.fact_points明确选中的事实及其逐字引文；审稿指出未获选定引文支持的参数时，整句删除或改成现场核验建议，不要从完整知识库补回。');
+    }
   }
   const content = generated.content;
-  assertGrounded(content, usableEvidence);
+  assertGrounded(content, usableEvidence, strategy.value.fact_points);
   const imageResult = await integrateImages({ task, evidence: usableEvidence, assets, platform, strategy: strategy.value }, images, options);
   images = imageResult.images;
   if (imageResult.stage) stages.push(imageResult.stage);

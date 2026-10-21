@@ -1,21 +1,49 @@
 #!/usr/bin/env node
-// Run locally; never print credentials or provider response bodies.
-const { isConfigured, requestJson } = require('../services/api/src/clients/llmClient.cjs');
+// Print only diagnostic status; never print credentials or provider response bodies.
 async function main() {
-  console.log('文字模型配置完整：', isConfigured());
-  if (!isConfigured()) { process.exitCode = 1; return; }
-  console.log('文字模型：', process.env.LLM_MODEL);
-  console.log('发送最小连接测试，最多等待 60 秒……');
-  const started = Date.now();
-  try {
-    const result = await requestJson('只返回 JSON：{"ok":true}', {}, { timeoutMs: 60000 });
-    console.log('连接成功；耗时（秒）：', ((Date.now() - started) / 1000).toFixed(1));
-    console.log('JSON 响应有效：', result.value.ok === true);
-  } catch (error) {
-    console.log('检测失败：', error.code || 'UNKNOWN');
-    console.log('说明：', error.code ? error.message : '请检查本机网络连接。');
-    console.log('耗时（秒）：', ((Date.now() - started) / 1000).toFixed(1));
+  const { LLM_BASE_URL: base, LLM_API_KEY: key, LLM_MODEL: model } = process.env;
+  if (!base || !key || !model) {
+    console.log('CONFIG_MISSING: run with node --env-file=.env scripts/check-model-connection.cjs');
     process.exitCode = 1;
+    return;
+  }
+  const endpoint = base.replace(/\/$/, '');
+  const headers = { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
+  console.log('Configured model:', model);
+  for (const stage of ['models', 'chat']) {
+    const started = Date.now();
+    console.log(stage === 'models' ? 'Checking model list...' : 'Checking one minimal text generation (may use a small amount of text credit)...');
+    try {
+      const response = await fetch(`${endpoint}/${stage === 'models' ? 'models' : 'chat/completions'}`, {
+        method: stage === 'models' ? 'GET' : 'POST',
+        headers,
+        redirect: 'error',
+        signal: AbortSignal.timeout(60000),
+        ...(stage === 'chat' ? { body: JSON.stringify({ model, temperature: 0.3,
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'system', content: 'Reply with JSON only.' }, { role: 'user', content: 'Return {"ok":true} only.' }],
+        }) } : {}),
+      });
+      console.log(`${stage}: HTTP ${response.status}, ${Math.round((Date.now() - started) / 1000)}s`);
+      if (!response.ok) {
+        await response.body?.cancel();
+        process.exitCode = 1;
+        continue;
+      }
+      const payload = await response.json();
+      if (stage === 'models') {
+        const available = Array.isArray(payload.data) && payload.data.some((item) => item.id === model);
+        console.log('Configured model listed:', available);
+      } else {
+        const content = payload.choices?.[0]?.message?.content;
+        console.log('Chat response received:', typeof content === 'string' && content.length > 0);
+        if (typeof content !== 'string' || !content.length) process.exitCode = 1;
+      }
+    } catch (error) {
+      const code = error.cause?.code || error.code;
+      console.log(`${stage}: ${error.name}, ${typeof code === 'string' && /^[A-Z0-9_]+$/.test(code) ? code : 'REQUEST_FAILED'}, ${Math.round((Date.now() - started) / 1000)}s`);
+      process.exitCode = 1;
+    }
   }
 }
-main().catch(() => { console.log('检测未完成。'); process.exitCode = 1; });
+main().catch(() => { console.log('DIAGNOSTIC_FAILED'); process.exitCode = 1; });

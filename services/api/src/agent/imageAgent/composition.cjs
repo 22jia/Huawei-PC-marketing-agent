@@ -38,7 +38,16 @@ async function composeSubject(background, subject, options = {}) {
     const sharp = imageLibrary();
     const metadata = await sharp(background, { limitInputPixels: 25000000 }).metadata();
     if (!['png', 'jpeg', 'webp'].includes(metadata.format) || (metadata.pages || 1) !== 1) throw new ImageProviderError('IMAGE_INVALID_OUTPUT', '生成背景不是支持的静态图片');
-    const buffer = await sharp(background, { limitInputPixels: 25000000 }).resize(1024, 1024, { fit: 'cover' }).composite([{ input: subject.buffer, gravity: 'south' }]).png().toBuffer();
+    const style = options.style;
+    let overlay = { input: subject.buffer, gravity: 'south' };
+    if (style) {
+      const x = style.id === 'a1' ? 0.68 : ['a2', 'a4'].includes(style.id) ? 0.32 : 0.5;
+      const y = style.id === 'b1' ? 0.38 : 0.5;
+      const maxWidth = style.group === 'daily' ? 480 : 700;
+      const resized = await sharp(subject.buffer).resize({ width: maxWidth, height: 480, fit: 'inside', withoutEnlargement: true }).png().toBuffer({ resolveWithObject: true });
+      overlay = { input: resized.data, left: Math.max(0, Math.min(1024 - resized.info.width, Math.round(1024 * x - resized.info.width / 2))), top: Math.max(0, Math.min(1024 - resized.info.height, Math.round(1024 * y - resized.info.height / 2))) };
+    }
+    const buffer = await sharp(background, { limitInputPixels: 25000000 }).resize(1024, 1024, { fit: 'cover' }).composite([overlay]).png().toBuffer();
     assertActive(options.signal);
     return { buffer, extension: 'png' };
   } catch (error) {

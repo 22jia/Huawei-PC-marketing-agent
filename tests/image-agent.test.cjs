@@ -12,6 +12,7 @@ const { generateCreativeImages, assertInput, buildPrompt } = require('../service
 const { createHttpProvider, createProvider, mockProvider } = require('../services/api/src/agent/imageAgent/provider.cjs');
 const { saveGeneratedImage, resolveGeneratedImage, cleanupGeneratedImages } = require('../services/api/src/agent/imageAgent/storage.cjs');
 const { prepareSubject, composeSubject } = require('../services/api/src/agent/imageAgent/composition.cjs');
+const { chooseStyle } = require('../services/api/src/agent/imageAgent/styles.cjs');
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
 const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'image-agent-output-'));
 fs.writeFileSync(path.join(fixtureRoot, 'product.png'), PNG);
@@ -41,6 +42,15 @@ test('background prompt excludes product generation and unverified product facts
   assert.match(prompt, /background only/);
   assert.match(prompt, /No product/);
   assert.doesNotMatch(prompt, /UNVERIFIED-PARAMETER/);
+});
+
+test('style selection maps explicit templates and task fields deterministically', () => {
+  const value = input();
+  assert.equal(chooseStyle(value, { purpose: 'B-3 模块卖点海报', caption: '卖点' }).style.id, 'b3');
+  assert.equal(chooseStyle(value, { purpose: '图书馆学习封面', caption: '大学生日常' }).style.id, 'a2');
+  assert.equal(chooseStyle({ ...value, task: { ...value.task, scenario: '生活场景' } }, { purpose: '宣传海报', caption: '高端介绍' }).style.id, 'b1');
+  assert.equal(chooseStyle(value, { purpose: '数据可视化图', caption: '参数对比' }).unsupported.id, 'data');
+  assert.equal(chooseStyle(value, { purpose: '户外街拍手持', caption: '人物使用' }).unsupported.id, 'handheld');
 });
 
 test('uses documented endpoint, model, size and server credential only', async (t) => {
@@ -155,8 +165,12 @@ test('compositing preserves a supplied official subject and rejects invalid back
   assert.equal(result.images[0].source_product_image, 'asset-1');
   assert.match(result.images[0].url, /^\/api\/v1\/generated-assets\/img_[a-f0-9]{32}\.png$/);
   const filename = result.images[0].url.split('/').pop();
-  const pixel = await sharp(resolveGeneratedImage(filename, { root: outputRoot })).extract({ left: 500, top: 1000, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
-  assert.deepEqual([...pixel], [255, 0, 0]);
+  const pixels = await sharp(resolveGeneratedImage(filename, { root: outputRoot })).removeAlpha().raw().toBuffer();
+  let redPixels = 0;
+  for (let i = 0; i < pixels.length; i += 3) {
+    if (pixels[i] === 255 && pixels[i + 1] === 0 && pixels[i + 2] === 0) redPixels++;
+  }
+  assert.equal(redPixels, 50 * 40, 'all solid official subject pixels remain after placement');
   const subject = await prepareSubject(value.assets[0]);
   await assert.rejects(composeSubject(Buffer.from('<svg>unsafe</svg>'), subject), { code: 'IMAGE_INVALID_OUTPUT' });
   await assert.rejects(generateCreativeImages(value, { provider: mockProvider([{ url: 'https://example.com/a.png' }]) }), { code: 'IMAGE_INVALID_OUTPUT' });
