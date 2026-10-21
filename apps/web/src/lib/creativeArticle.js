@@ -1,7 +1,14 @@
 // Keep the same illustrated artifact in chat, clipboard and Markdown download.
 export function creativeArticle(result) {
   const { content, images = [] } = result;
-  const picture = (image) => `![${image.description.replace(/[\[\]\r\n]/g, '')}](${image.url})\n\n*${image.caption}*\n`;
+  const picture = (image) => {
+    const description = String(image.description || '产品配图').replace(/[\[\]\r\n]/g, '');
+    const caption = String(image.caption || '').replace(/\r?\n/g, ' ');
+    const sourceLabel = image.generated
+      ? 'AI生成合成图（背景由 AI 生成，产品主体为知识库原图）'
+      : '知识库原图（官方产品素材）';
+    return `![${description}](${image.url})\n\n*${sourceLabel}${caption ? `｜${caption}` : ''}*\n`;
+  };
   const cover = images.filter((i) => i.placement === 'cover');
   const inline = images.filter((i) => i.placement === 'inline');
   const closing = images.filter((i) => i.placement === 'closing');
