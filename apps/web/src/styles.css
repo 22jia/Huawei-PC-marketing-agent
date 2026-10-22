@@ -240,3 +240,7 @@ body { margin: 0; background: #f5f7fa; color: #1f2937; font-family: -apple-syste
   background: #f6f7f9;
 }
 .assistant-message .markdown-content p:has(> em:only-child) { color: #697586; font-size: 12px; text-align: center; }
+.recommendation-carousel { display: flex; gap: 14px; overflow-x: auto; padding: 4px 0 14px; scroll-snap-type: x proximity; }
+.recommendation-card { flex: 0 0 min(330px, 88%); scroll-snap-align: start; }
+.recommendation-image { display: block; width: 100%; height: 140px; object-fit: contain; margin-bottom: 12px; }
+.recommendation-fit { margin-top: 12px; }

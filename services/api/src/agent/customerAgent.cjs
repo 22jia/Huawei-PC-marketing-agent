@@ -2,6 +2,7 @@ const { retrieveEvidence } = require('../services/evidenceService.cjs');
 const { planTask, generateCustomer } = require('../clients/llmClient.cjs');
 const { collectEvidence, assertGrounded, pipelineMeta } = require('./agentRuntime.cjs');
 const { buildPriceSolution } = require('../services/priceSolutionService.cjs');
+const { recommendProductsForScenario, classifyCustomerSegment } = require('../services/scenarioProductSearch.cjs');
 
 const FOLLOW_UP_DAYS = [1, 3, 7];
 
@@ -12,8 +13,8 @@ function normalizeInput(input = {}) {
     model: String(input.model || '').trim(),
     budget: String(input.budget || '').trim(),
     store_name: String(input.store_name || '').trim(),
-    follow_up_days: Array.isArray(input.follow_up_days)
-      ? input.follow_up_days.filter((day) => FOLLOW_UP_DAYS.includes(Number(day))).map(Number)
+    follow_up_days: input.needs_follow_up === false ? [] : Array.isArray(input.follow_up_days)
+      ? [...new Set(input.follow_up_days.map(Number).filter((day) => FOLLOW_UP_DAYS.includes(day)))].sort((a, b) => a - b)
       : FOLLOW_UP_DAYS,
   };
 }
@@ -63,8 +64,7 @@ function inferCustomer(description) {
 
 function buildQuestions(task, insight) {
   const questions = [];
-  if (!task.model) questions.push('您目前在看哪一款或哪个价位段的 MateBook？');
-  if (!/预算|价格|贵|便宜|优惠/.test(task.customer_description)) questions.push('这次购机大致预算是多少？');
+  if (!task.budget && !/预算|价格|贵|便宜|优惠/.test(task.customer_description)) questions.push('这次购机大致预算是多少？');
   if (insight.audience === '待确认') questions.push('这台电脑主要是谁使用，日常最常做什么？');
   if (!/配置|软件|剪辑|设计|游戏|办公|论文|学习/.test(task.customer_description)) questions.push('最常使用的软件或任务是什么？');
   if (!/手机|平板|设备|协同|生态/.test(task.customer_description)) questions.push('您现在是否在使用华为手机或平板，希望电脑和它们协同吗？');
@@ -116,17 +116,35 @@ function buildObjectionResponses(insight, evidence) {
   return responses;
 }
 
-function buildFollowUpPlan(days, insight) {
-  const topic = (insight.needs[0] || '电脑选购').replace(/^(关注|用于|涉及)/, '');
+function buildFollowUpPlan(days, insight, task = {}) {
+  // Fallback copy must not repeat rejected model prose, raw prices or unverified
+  // product claims. Use only the customer's stated scenario to choose a topic.
+  const scenario = String(task.customer_description || insight.needs?.join(' ') || '');
+  const thesis = /论文/.test(scenario);
+  const creative = /剪辑|建模|渲染|设计/.test(scenario);
+  const phone = /手机|传文件|互传|协同/.test(scenario);
+  const portable = /轻|便携|太重|移动|出差/.test(scenario);
+  const softwareKnown = /\b(?:Word|WPS|Excel|SPSS|CAD|MATLAB|Photoshop|Premiere)\b/i.test(scenario);
+  const topic = thesis ? '论文模板和引用插件' : creative ? '常用创作软件和项目文件' : '常用软件和文件';
+  const concern = portable ? '携带负担' : phone ? '手机传文件的操作' : creative ? '软件和项目的适配' : '日常使用体验';
+  const scope = task.model ? '这款电脑' : '合适的候选';
+  const overBudget = task.over_budget === true;
+  const experience = portable ? '您可以先拿起来感受一下，看看平时装包带着是否合适'
+    : phone ? '您可以带手机试传一份常用文件，看看操作顺不顺手'
+      : '您可以带一份常用文件，试一下编辑和日常操作';
   const messages = {
-    1: `您好，接着上次关于${topic}的沟通，想再确认一下您的预算和常用软件，方便我整理适合您的型号资料。`,
-    3: `您好，关于${topic}，您目前还有哪些地方拿不准？可以把最想比较的一点告诉我，我们一起看看，也欢迎带上常用文件到店试用。`,
-    7: '您好，最近电脑选购考虑得怎么样了？您的用途或预算有没有变化？如果还在比较，我们可以约个方便的时间，用您的日常任务实际体验一下。',
+    1: softwareKnown
+      ? `您好，您提到的常用软件，我们选电脑时先核对它的系统要求。您可以准备一份日常文件，用来试一下${scope}的实际操作。`
+      : `您好，您在意${concern}，${topic}也值得一起确认。平时最离不开的是哪个软件或插件？我先按它的要求帮您缩小选择范围。`,
+    3: overBudget
+      ? '您好，咱们先把预算守住。我可以帮您核实意向款的门店优惠，也可以把预算内替代款的主要取舍列清楚；您更想先比较哪一项？'
+      : `您好，${experience}。配置取舍和本店可用优惠也可以一起核清，您目前最想先确认哪一点？`,
+    7: '您好，电脑选购可以按自己的节奏决定。如果还没定下来，您可以把仍没确认的一点告诉我，我只围绕那一点补充；如果已经选好了或暂时不买，我这边就不再打扰。',
   };
   const byDay = {
-    1: { objective: '补齐需求并发送匹配资料', action: '根据到店沟通确认的预算、软件和设备生态，发送对应型号的官方资料与未决问题清单。' },
-    3: { objective: '处理比较中的顾虑', action: '针对客户最在意的一项顾虑，提供可核验的配置说明或邀请到店体验；不重复发送泛化促销。' },
-    7: { objective: '确认决策状态并给出下一步', action: '询问需求或预算是否变化；如仍在考虑，安排一次针对目标任务的短时体验，不虚构库存或优惠紧迫感。' },
+    1: { objective: '补齐一个影响选型的条件', action: `先核对${topic}及对应系统要求，已提供的软件不重复询问。收到回复后记录支持情况并缩小候选；未回复不当天追加消息。` },
+    3: { objective: overBudget ? '守住预算，比较优惠与替代' : '解决一个取舍，核实门店权益', action: `${overBudget ? '核实意向款报价、优惠资格和叠加关系；仍超预算时准备预算内替代及具体差异。' : '围绕客户首要顾虑准备一次针对性演示，并核实所选配置的门店报价、可用优惠及叠加关系。'}有回复则按其关注点继续；未回复且无新增信息不重复催问。` },
+    7: { objective: '确认决定并尊重联系意愿', action: '如已成交，转为首次使用和迁移帮助；仍在比较，只处理一个未决问题；明确不买或拒绝联系则停止，持续未回复则暂停主动跟进并记录。' },
   };
   return days.map((day) => ({
     day,
@@ -148,6 +166,7 @@ async function assistCustomer(input, options = {}) {
   }
 
   const planned = await (options.planTask || planTask)(task);
+  const customerSegment = classifyCustomerSegment(task.customer_description);
   const insight = { ...planned.value, evidence_queries: planned.value.retrieval_queries };
   // A specific model is the strongest retrieval anchor. Scenario terms influence
   // the explanation and can later drive a secondary, targeted retrieval pass.
@@ -161,6 +180,10 @@ async function assistCustomer(input, options = {}) {
     retrievalError = error.message || '知识检索暂不可用';
   }
 
+  // Scenario queries can match several versions without the customer choosing
+  // any model. Only an explicit model selection requires version clarification.
+  if (!task.model) retrieved = { ...retrieved, ambiguous_model: false, model_candidates: [] };
+
   const evidence = (retrieved.evidence || []).filter((item) => item.content && item.confidence !== 'unavailable');
   if (!retrievalError && !evidence.length) {
     const unavailable = (retrieved.evidence || []).find((item) => item.warning);
@@ -170,25 +193,75 @@ async function assistCustomer(input, options = {}) {
   if (retrieved.ambiguous_model) questions.unshift('本地资料中有多个同系列版本；客户关注的是鸿蒙版，还是 Windows 酷睿 Ultra 版？');
   const recommendationStatus = retrieved.ambiguous_model ? 'needs_model_clarification'
     : evidence.length ? 'needs_staff_confirmation' : 'insufficient_evidence';
+  const hasProductScenario = customerSegment.key !== 'unknown' || insight.needs?.some((need) => !/预算与购机成本/.test(need));
+  const priceSolution = (options.buildPriceSolution || buildPriceSolution)(task.model, task.budget);
+  const needsAlternatives = Boolean(task.model && priceSolution?.budget_status === 'over_budget');
+  const candidateProducts = (!task.model || needsAlternatives) && !retrieved.ambiguous_model && hasProductScenario
+    ? (options.recommendProductsForScenario || recommendProductsForScenario)(task.customer_description, { limit: 20 }).map((product) => ({
+      score: product.score,
+      model: product.name,
+      positioning: product.positioning,
+      reason: product.reason || product.positioning,
+      suitable_tasks: product.matched_tasks || product.suitable_tasks?.slice(0, 3) || [],
+      source_path: product.source_path,
+      source_url: product.source_url,
+      image: product.image || '',
+      price_solution: (options.buildPriceSolution || buildPriceSolution)(product.name, task.budget),
+    })).filter((product) => product.model !== task.model && (!(needsAlternatives || task.budget) || product.price_solution?.budget_status === 'within_budget')).sort((a, b) => {
+      const aFit = a.price_solution?.budget_status === 'within_budget' ? 1 : 0;
+      const bFit = b.price_solution?.budget_status === 'within_budget' ? 1 : 0;
+      const aKnown = a.price_solution?.status === 'available' ? 1 : 0;
+      const bKnown = b.price_solution?.status === 'available' ? 1 : 0;
+      return bFit - aFit || bKnown - aKnown || (b.score || 0) - (a.score || 0);
+    }).slice(0, 3).map(({ score, ...product }) => {
+      const prices = product.price_solution;
+      const affordable = (prices?.configurations || []).filter((item) => !prices.budget || item.price <= prices.budget);
+      const recommended = affordable.sort((a, b) => b.price - a.price)[0] || prices?.tiers?.[0] || null;
+      return { ...product, recommended_configuration: recommended,
+        comparison: needsAlternatives && recommended ? {
+          reference_model: task.model,
+          saving: Math.round((priceSolution.minimum_price - recommended.price) * 100) / 100,
+          configuration: `${priceSolution.minimum_configuration || '意向配置待核'} → ${recommended.configuration}`,
+          note: '不同型号，系统、屏幕及软件兼容性需分别核对',
+        } : null };
+    })
+    : [];
 
   const generated = await (options.generateCustomer || generateCustomer)({ task, analysis: planned.value, evidence, ambiguous_model: Boolean(retrieved.ambiguous_model), model_candidates: retrieved.model_candidates || [] });
-  assertGrounded(generated.value, evidence);
-  const output = generated.value;
+  let output = generated.value;
+  try {
+    assertGrounded(output, evidence);
+  } catch (error) {
+    // Keep source-backed product cards when generated prose fails verification.
+    // Never return the rejected prose or weaken factual validation.
+    if (!['UNSUPPORTED_CLAIM', 'UNVERIFIED_PRICE'].includes(error.code)) throw error;
+    retrievalError = retrievalError || '生成话术未通过核验，已改用基础讲解；产品参考信息仍可比较。';
+    output = {
+      rationale: '先按用途和预算比较候选产品，再核实门店优惠。',
+      questions: [],
+      sales_script: buildTalkTrack({ ...task, model: '' }, inferCustomer(task.customer_description), [], Boolean(retrieved.ambiguous_model)),
+      objection_responses: buildObjectionResponses(insight, []),
+      follow_up_plan: buildFollowUpPlan(task.follow_up_days, insight, { ...task, over_budget: needsAlternatives }),
+    };
+  }
+  const displayedRecommendationStatus = candidateProducts.length && recommendationStatus === 'insufficient_evidence'
+    ? 'needs_staff_confirmation' : recommendationStatus;
 
   return {
     status: retrievalError ? 'partial' : 'success',
     generation_mode: 'llm',
     llm: pipelineMeta(planned.meta, generated.meta, planned.value.retrieval_queries),
     customer: {
+      segment: customerSegment,
       audience: insight.audience,
       needs: insight.needs,
       concerns: insight.concerns,
       buying_stage: insight.buying_stage,
       summary: insight.summary,
     },
-    clarification: { questions: [...new Set([...questions, ...output.questions])], required_before_specific_recommendation: Boolean(retrieved.ambiguous_model || !task.model || !evidence.length) },
+    clarification: { questions: [...new Set([...questions, ...output.questions])], required_before_specific_recommendation: Boolean(retrieved.ambiguous_model || (!evidence.length && !candidateProducts.length)) },
     solution: {
-      status: recommendationStatus,
+      status: displayedRecommendationStatus,
       model: task.model || null,
       rationale: retrieved.ambiguous_model ? '本地资料存在多个同系列版本，请先选择版本。' : output.rationale,
       evidence: evidence.map((item) => ({
@@ -202,7 +275,9 @@ async function assistCustomer(input, options = {}) {
         updated_at: item.updated_at || null,
       })),
       candidate_models: retrieved.model_candidates || [],
-      price_solution: buildPriceSolution(task.model, task.budget),
+      candidate_products: candidateProducts,
+      recommendation_stage: needsAlternatives ? 'budget_alternatives' : task.model ? 'selected' : 'shortlist',
+      price_solution: priceSolution,
     },
     sales_script: { ...output.sales_script, discovery_questions: output.questions },
     objection_responses: output.objection_responses.map((item) => ({ ...item, requires_store_confirmation: true })),

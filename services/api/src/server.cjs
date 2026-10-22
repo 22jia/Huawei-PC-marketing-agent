@@ -9,6 +9,8 @@ const localKnowledgeBrowser = require('./services/localKnowledgeBrowser.cjs');
 const ticketStore = require('./services/ticketStore.cjs');
 const productSpotlight = require('./services/productSpotlight.cjs');
 const platformStrategies = require('./agent/platformStrategies.cjs');
+const { fetchOfferRules } = require('./services/storeOfferRules.cjs');
+const { queryChannelPrices } = require('./services/channelPriceService.cjs');
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -84,6 +86,13 @@ async function route(request, response) {
     }
     if (method !== 'POST') return sendJson(response, 405, { status: 'error', code: 'METHOD_NOT_ALLOWED', request_id: id });
     const body = await readJson(request);
+    if (url.pathname === '/api/v1/store/channel-prices') {
+      return sendJson(response, 200, { request_id: id, ...await queryChannelPrices(body) });
+    }
+    if (url.pathname === '/api/v1/store/offer-rules') {
+      const result = await fetchOfferRules(body);
+      return sendJson(response, result.status === 'error' ? 400 : 200, { request_id: id, ...result });
+    }
     if (url.pathname === '/api/v1/analyze') {
       return sendJson(response, 200, { request_id: id, ...analyzeTask(body) });
     }

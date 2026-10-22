@@ -1,0 +1,15 @@
+{
+  "category": "电脑",
+  "rate": 0.15,
+  "cap": 1500,
+  "price_cap": null,
+  "per_person_limit": 1,
+  "effective_from": "2026-01-01",
+  "review_until": "2026-12-31",
+  "checked_at": "2026-10-22",
+  "source": "https://www.gov.cn/zhengce/zhengceku/202512/content_7053369.htm",
+  "document": "商办流通函2025年第469号",
+  "basis": "扣除各环节优惠后最终销售价格（扣国补前）",
+  "requirements": ["个人消费者，每人电脑类限1件", "1级能效或水效标准产品", "核验当地资格、参与商家、商品备案及补贴可用状态", "资格申领人、付款人、收货人和发票抬头一致"],
+  "source_status": "official_rule_local_applicability_pending"
+}

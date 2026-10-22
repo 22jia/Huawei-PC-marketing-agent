@@ -45,6 +45,19 @@ test('customer output gets one schema repair with concrete field feedback', asyn
   assert.equal(result.value.follow_up_plan.length, 3);
 });
 
+test('customer generation prompt keeps prices in the deterministic price panel', async () => {
+  let prompt = '';
+  const value = { questions: [], rationale: '按预算比较', sales_script: { opening: '您好', recommendation: '先看适合您的配置', close: '您可以先体验一下' }, objection_responses: [], follow_up_plan: [] };
+  await generateCustomer({ task: { follow_up_days: [] }, analysis: {}, evidence: [], ambiguous_model: false, model_candidates: [] }, {
+    fetch: async (_url, request) => {
+      prompt = JSON.parse(request.body).messages[0].content;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(value) } }] }) };
+    },
+  });
+  assert.match(prompt, /价格、预算金额、折扣、补贴金额和优惠后金额/);
+  assert.match(prompt, /禁止.*任何.*元/);
+});
+
 test('missing evidence, conflicting facts and missing images stop article delivery', async () => {
   const mustNotGenerate = async () => { throw new Error('must not generate unsupported article'); };
   const missing = await generate(task, { ...options, retrieveEvidence: async () => ({ evidence: [] }), generateCopy: mustNotGenerate });

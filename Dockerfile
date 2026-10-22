@@ -3,6 +3,7 @@ WORKDIR /build/apps/web
 COPY apps/web/package.json apps/web/package-lock.json ./
 RUN npm ci
 COPY apps/web/ ./
+COPY shared/ /build/shared/
 RUN npm run build
 
 FROM node:22-bookworm-slim
@@ -15,6 +16,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY services/api/ /app/services/api/
 COPY scripts/start-api.cjs /app/scripts/start-api.cjs
+COPY shared/ /app/shared/
+COPY skills/ /app/skills/
 COPY 华为PC全板块深度知识库_v7/ /app/华为PC全板块深度知识库_v7/
 COPY 素材总清单_2026-10-18.md /app/素材总清单_2026-10-18.md
 COPY --from=web-build /build/apps/web/dist/ /usr/share/nginx/html/

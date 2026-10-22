@@ -7,8 +7,10 @@ import { MarkdownContent } from './components/MarkdownContent';
 import { creativeArticle, creativeReport } from './lib/creativeArticle';
 import { ArticleDeliveryTools } from './components/ArticleDeliveryTools';
 import { ModelRunStatus } from './components/ModelRunStatus';
+import { StorePricePlanner } from './components/StorePricePlanner';
+import { ProductRecommendations } from './components/ProductRecommendations';
 import {
-  Alert, Badge, Breadcrumb, Button, Card, Checkbox, Col, Descriptions, Divider, Drawer, Empty, Form,
+  Alert, Badge, Breadcrumb, Button, Card, Checkbox, Col, Collapse, Descriptions, Divider, Drawer, Empty, Form,
   Input, Layout, List, Radio, Row, Select, Space, Statistic, Steps, Tabs, Tag,
   Timeline, Typography, message, Table, Modal, Progress,
 } from 'antd';
@@ -175,6 +177,12 @@ function CustomerAssistWorkbench({ messageApi }) {
   const [loading, setLoading] = useState(false);
   const [ticket, setTicket] = useState(null);
   const [assistError, setAssistError] = useState('');
+  const [pricePlanner, setPricePlanner] = useState(null);
+
+  function openPricePlanner(solution = result?.solution?.price_solution, tier) {
+    setPricePlanner({ solution, tier: tier || solution?.budget_fit || solution?.tiers?.[0],
+      model: solution?.model || result?.solution?.model || form.getFieldValue('model'), budget: form.getFieldValue('budget') });
+  }
 
   async function handleAssist(values) {
     setLoading(true);
@@ -212,7 +220,7 @@ function CustomerAssistWorkbench({ messageApi }) {
   }
 
   const solutionTab = result && <div>
-    <Alert
+    {!result.solution?.candidate_products?.length && <Alert
       type={result.solution?.status === 'insufficient_evidence' ? 'warning' : 'info'}
       showIcon
       message={result.solution?.status === 'needs_model_clarification'
@@ -220,16 +228,17 @@ function CustomerAssistWorkbench({ messageApi }) {
         : result.solution?.status === 'needs_staff_confirmation'
           ? '本地知识库已找到产品资料，需店员核对'
           : '暂不能形成具体型号推荐'}
-      description={result.solution?.rationale}
-    />
+      description={result.solution?.status === 'needs_model_clarification' ? '请确认系统版本。' : undefined}
+    />}
     {result.solution?.candidate_models?.length > 0 && <div className="question-block"><Text strong>请选择客户关注的版本</Text><List size="small" dataSource={result.solution.candidate_models} renderItem={(item) => <List.Item actions={[<Button key="select" type="primary" disabled={loading} onClick={() => selectModel(item)}>选择并检索</Button>]}><Space><FileSearchOutlined /><Text>{item}</Text></Space></List.Item>} /></div>}
-    {result.clarification?.questions?.length > 0 && <div className="question-block"><Text strong>建议先追问</Text><List size="small" dataSource={result.clarification.questions} renderItem={(question) => <List.Item><FileSearchOutlined /> {question}</List.Item>} /></div>}
-    {result.solution?.price_solution?.status === 'available' && <section className="price-solution"><div className="price-solution-heading"><div><Title level={4}>四档价格方案</Title><Text type="secondary">{result.solution.price_solution.model} · 官方价格快照 {result.solution.price_solution.snapshot_date}</Text></div><Tag color="blue">{result.solution.price_solution.tiers.length} 档</Tag></div><Row gutter={[12, 12]}>{result.solution.price_solution.tiers.map((tier) => <Col xs={24} sm={12} key={`${tier.configuration}-${tier.price}`}><Card size="small" className={tier.recommended ? 'price-tier recommended' : 'price-tier'} title={<Space>{tier.label}{tier.recommended && <Tag color="green">预算内优先</Tag>}</Space>}><Statistic value={tier.price} prefix="¥" precision={0} /><Paragraph className="price-tier-config">{tier.configuration}</Paragraph><Text type="secondary">{tier.status}</Text><Paragraph className="price-tier-conditions">权益：{tier.conditions || '未记录'}</Paragraph></Card></Col>)}</Row><Alert className="price-solution-note" type="info" showIcon message={result.solution.price_solution.note} description={<span>金额仅用于配置价格比较，不是承诺价；下单前需按对应 SKU 核对价格、权益与库存。<a href={result.solution.price_solution.tiers[0]?.source_url} target="_blank" rel="noreferrer">打开官方页面核对</a> · 来源：{result.solution.price_solution.source_path}</span>} /></section>}
+    {result.solution?.candidate_products?.length > 0 && <ProductRecommendations products={result.solution.candidate_products} segment={result.customer?.segment} alternatives={result.solution.recommendation_stage === 'budget_alternatives'} loading={loading} onSelect={selectModel} onPrice={openPricePlanner} />}
+    {result.clarification?.questions?.length > 0 && <div className="question-block"><Text strong>下一步沟通</Text><List size="small" dataSource={result.clarification.questions.slice(0, 2)} renderItem={(question) => <List.Item><FileSearchOutlined /> {question}</List.Item>} /></div>}
+    {result.objection_responses?.length > 0 && <div className="question-block"><Text strong>客户关切与回应</Text><List size="small" dataSource={result.objection_responses.slice(0, 2)} renderItem={(item) => <List.Item><div><Text strong>{item.objection}</Text><Paragraph className="list-paragraph">{item.response}</Paragraph></div></List.Item>} /></div>}
+    {result.solution?.price_solution?.status === 'available' && <section className="price-solution"><div className="price-solution-heading"><div><Title level={4}>价格参考</Title><Text type="secondary">{result.solution.price_solution.model} · VMall 参考价 · 门店价待核</Text></div><Button onClick={() => openPricePlanner()}>查门店优惠</Button></div>{result.solution.price_solution.budget_status === 'over_budget' && <Alert type="warning" showIcon message={`意向型号最低参考价 ¥${result.solution.price_solution.minimum_price}，超预算 ¥${result.solution.price_solution.budget_gap}`} description={result.solution.price_solution.budget_fit ? `同型号预算内配置：${result.solution.price_solution.budget_fit.configuration}，参考价 ¥${result.solution.price_solution.budget_fit.price}` : (result.solution?.candidate_products?.length ? '暂无同型号预算内配置，可比较预算内替代。' : '暂无已知的预算内替代，可先核实本店报价与可用优惠。')} />}{result.solution.price_solution.budget_status !== 'over_budget' && <Row gutter={[12, 12]}>{result.solution.price_solution.tiers.map((tier) => { const offerSummary = typeof tier.offer_summary === 'string' && tier.offer_summary.trim() && tier.offer_summary !== '未记录可确认的直降或赠品' ? tier.offer_summary.trim() : ''; return <Col xs={24} sm={12} key={`${tier.configuration}-${tier.price}`}><Card size="small" className={tier.recommended ? 'price-tier recommended' : 'price-tier'} title={<Space>{tier.label}{tier.recommended && <Tag color="green">预算内最高档</Tag>}</Space>}><Statistic value={tier.price} prefix="¥" precision={0} /><Paragraph className="price-tier-config">{tier.configuration}</Paragraph><Paragraph className="price-tier-conditions">{offerSummary ? `线上优惠参考：${offerSummary}。` : '线上优惠待核实'}<Button type="link" size="small" onClick={() => openPricePlanner(result.solution.price_solution, tier)}>核实门店权益</Button></Paragraph></Card></Col>; })}</Row>}<Alert className="price-solution-note" type="info" showIcon message="官网参考价，门店成交价与库存待确认" description={<span><a href={result.solution.price_solution.tiers[0]?.source_url} target="_blank" rel="noreferrer">查看官网</a></span>} /></section>}
     {result.solution?.price_solution?.status === 'needs_model_clarification' && <Alert className="question-block" type="warning" showIcon message="暂不能给出价格梯度" description={result.solution.price_solution.message} />}
-    {result.solution?.price_solution?.status === 'unavailable' && <Alert className="question-block" type="info" showIcon message="该型号没有足够的价格档位" description={result.solution.price_solution.message} />}
-    <Divider />
-    <div className="section-label"><SafetyCertificateOutlined /> 检索证据</div>
-    <List dataSource={result.solution?.evidence || []} locale={{ emptyText: '当前没有可引用证据，请在门店资料中进一步核对。' }} renderItem={(item) => <List.Item className="evidence-item"><div><Text strong>{item.title}</Text><MarkdownContent className="evidence-excerpt">{item.excerpt}</MarkdownContent><Text type="secondary">来源：{item.source_path}{item.updated_at ? ` · 快照日期：${item.updated_at}` : ''}</Text>{item.source_url && <div><a href={item.source_url} target="_blank" rel="noreferrer">打开官方来源核对</a></div>}</div><Tag color={['local_snapshot', 'local_knowledge_base'].includes(item.source_status) ? 'orange' : 'blue'}>{['local_snapshot', 'local_knowledge_base'].includes(item.source_status) ? '本地库，待核对' : item.confidence}</Tag></List.Item>} />
+    {result.solution?.price_solution?.status === 'unavailable' && <Alert className="question-block" type="info" showIcon message="暂无可用参考价，请确认该配置的门店报价" />}
+    {result.solution?.model && <Button className="question-block" onClick={() => openPricePlanner()}>制定门店价格方案 · 对比线上线下</Button>}
+    <Collapse className="staff-evidence" items={[{ key: 'evidence', label: <Space><SafetyCertificateOutlined />店员核验来源</Space>, children: <List dataSource={result.solution?.evidence || []} locale={{ emptyText: '暂无核验来源' }} renderItem={(item) => <List.Item><Text>{item.title}</Text>{item.source_url && <a href={item.source_url} target="_blank" rel="noreferrer">查看来源</a>}</List.Item>} /> }]} />
   </div>;
 
   const scriptTab = result && <div>
@@ -245,8 +254,18 @@ function CustomerAssistWorkbench({ messageApi }) {
     <Col xs={24} lg={8}>
       <Card title={<Space><CustomerServiceOutlined />记录客户需求</Space>} className="panel-card" extra={<Button type="text" icon={<ReloadOutlined />} onClick={() => form.resetFields()}>重置</Button>}>
         <Form form={form} layout="vertical" initialValues={customerInitialValues} onFinish={handleAssist}>
+          <Paragraph type="secondary">载入演示需求（仅填表，点击生成后运行）</Paragraph>
+          <Space wrap style={{ marginBottom: 16 }}>
+            {[
+              { label: '学生学习', budget: '7000', description: '大学生，常在图书馆用Word写论文，担心电脑太重；已有华为手机，希望传文件方便。尚无意向型号。' },
+              { label: '职场办公', budget: '9000', description: '职场人士，经常出差和通勤，主要使用Excel处理表格、修改文档和会议演示，希望轻便，连接投影仪方便。尚无意向型号。' },
+            ].map((example) => <Button key={example.label} disabled={loading} onClick={() => {
+              form.setFieldsValue({ customer_description: example.description, budget: example.budget, model: '', customer_name: '', assignee: '' });
+              setResult(null); setTicket(null); setAssistError(''); setPricePlanner(null);
+            }}>{example.label}</Button>)}
+          </Space>
           <Form.Item name="customer_description" label="客户描述" extra="记录用途、顾虑、已有设备和沟通阶段；请不要输入手机号等隐私信息。" rules={[{ required: true, message: '请填写客户描述' }]}><Input.TextArea rows={6} placeholder="例如：客户常在图书馆写论文，担心电脑太重……" /></Form.Item>
-          <Form.Item name="model" label="意向型号（可选）"><Input placeholder="未确定时留空，Agent 会先建议追问" /></Form.Item>
+          <Form.Item name="model" label="意向型号（可选）"><Input placeholder="未确定时留空，先按用途和预算推荐" /></Form.Item>
           <Form.Item name="budget" label="客户预算（可选）"><Input inputMode="numeric" placeholder="例如：7000 元" /></Form.Item>
           <Form.Item name="customer_name" label="客户备注名"><Input placeholder="例如：李同学 / 3号桌客户" /></Form.Item>
           <Form.Item name="assignee" label="跟进人"><Input placeholder="例如：张三 / 店员姓名" /></Form.Item>
@@ -257,14 +276,14 @@ function CustomerAssistWorkbench({ messageApi }) {
       </Card>
     </Col>
     <Col xs={24} lg={16}>
-      <Card title={<Space><FileSearchOutlined />客户成交辅助</Space>} className="panel-card result-card">
+      <Card title={<Space><FileSearchOutlined />客户成交辅助</Space>} className="panel-card result-card" extra={<Button icon={<PlayCircleOutlined />} onClick={() => setPricePlanner({ demo: true, model: form.getFieldValue('model'), budget: form.getFieldValue('budget') })}>演示门店优惠方案</Button>}>
         {assistError && <Alert type="error" showIcon message="本次模型处理未完成" description={assistError} />}
         {!result && !loading && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入客户沟通情况，生成洞察、讲解与跟进草稿" className="empty-state" />}
-        {loading && <Alert type="info" showIcon message="正在分析需求、检索资料并生成方案" description="完成后展示实际模型、各模型调用耗时和用量。" />}
+        {loading && <Alert type="info" showIcon message="正在分析需求、检索资料并生成方案"  />}
         {result?.status === 'needs_clarification' && <Alert type="warning" showIcon message="需要补充客户描述" description={(result.questions || []).join('；')} />}
         {result?.customer && <>
-          <ModelRunStatus result={result} />
-          {result.guardrails?.retrieval_warning && <Alert className="result-alert" type="warning" showIcon message="华为商城动态核验提示" description={result.guardrails.retrieval_warning} />}
+          <Collapse size="small" items={[{ key: 'run', label: '运行记录', children: <ModelRunStatus result={result} /> }]} />
+          {result.guardrails?.retrieval_warning && <Collapse className="result-alert" items={[{ key: 'verification', label: '店员核验提醒', children: result.guardrails.retrieval_warning }]} />}
           <div className="result-meta"><Tag color={result.solution?.status === 'needs_model_clarification' ? 'processing' : result.status === 'success' ? 'success' : 'warning'}>{result.solution?.status === 'needs_model_clarification' ? '等待确认产品版本' : result.status === 'success' ? '辅助方案已生成' : '部分结果，需人工核对'}</Tag><Text type="secondary">{result.request_id}</Text></div>
           <Title level={3}>客户洞察</Title>
           <Paragraph>{result.customer.summary}</Paragraph>
@@ -274,10 +293,11 @@ function CustomerAssistWorkbench({ messageApi }) {
             <Descriptions.Item label="核心需求"><Space wrap>{result.customer.needs?.map((item) => <Tag color="blue" key={item}>{item}</Tag>)}</Space></Descriptions.Item>
             <Descriptions.Item label="当前顾虑"><Space wrap>{result.customer.concerns?.map((item) => <Tag color="orange" key={item}>{item}</Tag>)}</Space></Descriptions.Item>
           </Descriptions>
-          <Tabs className="customer-result-tabs" items={[{ key: 'solution', label: '方案与证据', children: solutionTab }, { key: 'script', label: '讲解与异议', children: scriptTab }, { key: 'follow-up', label: '1/3/7 天跟进', children: followUpTab }]} />
+          <Tabs className="customer-result-tabs" items={[{ key: 'solution', label: '推荐方案', children: solutionTab }, { key: 'script', label: '讲解与异议', children: scriptTab }, { key: 'follow-up', label: '1/3/7 天跟进', children: followUpTab }]} />
           <Divider /><Space><Button type="primary" icon={<PlusOutlined />} onClick={createTicket} disabled={Boolean(ticket)}> {ticket ? `已创建工单 ${ticket.id.slice(-6)}` : '创建客户跟进工单'} </Button><Text type="secondary">创建后可在工单列表中记录每次跟进和成交结果</Text></Space>
           <Badge status="processing" text="所有推荐、价格与跟进内容均须店员审核，不会自动发送" />
         </>}
+        {pricePlanner && <StorePricePlanner context={pricePlanner} onClose={() => setPricePlanner(null)} />}
       </Card>
     </Col>
   </Row>;
