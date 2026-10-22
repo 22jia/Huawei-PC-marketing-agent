@@ -29,6 +29,28 @@ function harness(t, providerFactory) {
 }
 const data = { mode: 'demo', model: 'gpt-image-2', prompt: '图书馆书桌' };
 
+test('automatic selection uses real catalog angles, preserves manual selection and stops before paid calls on missing matches', async (t) => {
+  let calls = 0;
+  const prompts = [];
+  const { request } = harness(t, () => ({ async generate({ prompt }) { calls++; prompts.push(prompt); return [{ buffer: demoPng() }]; } }));
+  const model = 'HUAWEI MateBook 14（鸿蒙版）';
+  for (const [prompt, expected] of [['INS风毛绒平铺', 'img_b8c11bbb9b6a'], ['大学生图书馆自习', 'img_578dcffad7c3']]) {
+    const response = await request('/generate', { ...data, mode: 'product', productModel: model, platform: 'xiaohongshu', prompt });
+    assert.equal(response.status, 200, response.buffer.toString());
+    assert.equal(JSON.parse(response.buffer).source_product_image, expected);
+    assert.match(prompts.at(-1), /Camera requirement: true overhead top-down/);
+  }
+  for (const extra of [{ productModel: 'HUAWEI MateBook 14' }, { productModel: model, color: '樱粉金' }]) {
+    const response = await request('/generate', { ...data, mode: 'product', prompt: '毛绒平铺', ...extra });
+    assert.equal(response.status, 400);
+    assert.match(JSON.parse(response.buffer).code, /IMAGE_(MATCH_REQUIRED|NO_MATCHED_ASSET)/);
+  }
+  assert.equal(calls, 2, 'unmatched source must not trigger generation');
+  const manual = await request('/generate', { ...data, mode: 'product', assetId: 'img_08f8cb6ac09e', prompt: '图书馆自习' });
+  assert.equal(manual.status, 200, manual.buffer.toString());
+  assert.equal(JSON.parse(manual.buffer).source_product_image, 'img_08f8cb6ac09e');
+});
+
 test('demo and local preview work without a key, processor or provider call', async (t) => {
   const { request } = harness(t, () => { throw new Error('must not call API'); });
   const response = await request('/generate', data);
@@ -60,6 +82,21 @@ test('rejects cross-site requests, bad input and non-image provider output', asy
   const response = await request('/generate', { ...data, mode: 'direct' });
   assert.equal(JSON.parse(response.buffer).code, 'IMAGE_INVALID_OUTPUT');
   assert.equal(calls, 1);
+});
+
+test('product generation accepts selected modeled catalog assets without a color token', async (t) => {
+  const source = fs.readFileSync(require.resolve('../services/api/package.json'));
+  assert.ok(source.length > 0);
+  const script = fs.readFileSync(require.resolve('../scripts/image-playground.cjs'), 'utf8');
+  assert.match(script, /if \(!item\.asset\.model\)/);
+  assert.doesNotMatch(script, /matchedColor|colorTerms/);
+  assert.match(script, /productsWithTransparency/);
+  const page = fs.readFileSync(require.resolve('../tools/image-playground/index.html'), 'utf8');
+  const app = fs.readFileSync(require.resolve('../tools/image-playground/app.js'), 'utf8');
+  assert.match(page, /id="product-model"/);
+  assert.match(page, /id="visual-kind"/);
+  assert.match(app, /hasTransparency &&/);
+  assert.match(app, /function automaticPrompt/);
 });
 
 test('configuration status never returns credentials and page uses local scripts', async (t) => {

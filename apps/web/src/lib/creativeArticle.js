@@ -30,6 +30,9 @@ export function imagePosition(image, result) {
 
 // Reviewable delivery report; copying the article remains free of internal notes.
 export function creativeReport(result) {
+  if (result.result_type === 'image_generation') {
+    return ['## 图片生成结果', ...result.images.map(image => `![AI生成图片](${image.url})\n\n*AI生成合成图｜产品主体来自知识库原图*`), ...(result.warnings || [])].join('\n\n');
+  }
   const scene = result.scene_judgment || {};
   const problems = Array.isArray(scene.main_problems) ? scene.main_problems.join('；') : scene.main_problems;
   const facts = (result.facts || []).map((item) => [

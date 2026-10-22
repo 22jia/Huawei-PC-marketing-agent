@@ -114,7 +114,7 @@ node --test tests/image-agent.test.cjs tests/llm-pipeline.test.cjs tests/progres
 
 - 素材检索继续由主 Agent 的 `creativeAssets` 完成；图片模块只读取本次 `assets` 中被 `strategy.image_plan` 引用的文件，不遍历知识库、不联网寻找替代型号。
 - 官方主体使用 `sharp` 解码、按比例缩放并确定性合成；绝不上传官方主体给生图服务。输入支持静态 PNG/JPEG/WebP，拒绝越界路径、符号链接逃逸、超过 12 MiB 或 2500 万像素的图片。
-- 已透明的官方图保留其 alpha 蒙版。不透明官方图保持完整，作为图片卡片拼贴，并返回相应提示。本版本**没有自动分割/抠图服务**，不会用白色阈值误删白色或银色机身。真实场景融合、自动抠图、透视匹配与发布质量审查仍需后续实现/人工核验。
+- 已透明的官方图保留其 alpha 蒙版。不透明官方图通过服务端 `REMOVE_BG_API_KEY` 调用 remove.bg 生成透明 PNG；缺少密钥、额度不足或服务未返回 alpha 时停止生成，不会以白底卡片冒充抠图结果，也不会用颜色阈值误删白色或银色机身。抠图结果仍需人工核验浅色边缘、接口与屏幕。
 - 模型只接收背景提示词，不接收产品参考图、证据、来源链接、磁盘路径或 Key。背景不承担功能/应用事实证明；主体像素来自官方图。背景是否出现多余产品/文字仍需人工审图，未提供自动语义视觉审核。
 - 所有选中素材先校验并准备，再开始付费请求。任意一张失败或取消时，删除本次已保存的结果，不返回半成功。
 
@@ -122,7 +122,7 @@ node --test tests/image-agent.test.cjs tests/llm-pipeline.test.cjs tests/progres
 
 用户提供的媒体文档确认请求为 `POST https://api.openai-next.com/v1/images/generations`，JSON 只发送 `model/prompt/size`；参考图编辑参数未经确认，因此本实现不发送臆造的 `reference_image`。默认 `gpt-image-2` 只是文档示例，尚未完成实际效果或价格对比；可用 `IMAGE_MODEL` 切换文档列出的其他模型，需自行核验账号权限和尺寸支持。
 
-服务端环境变量见根目录 `.env.example`。`CREDIT_MEDIA_API_KEY` 优先于兼容变量 `IMAGE_API_KEY`，二者均不能通过任务或函数 options 传入。`IMAGE_PROVIDER=none` 显式禁用，未配置 Key 时安全失败。模块不会自行加载 `.env`，独立调用时可使用 Node 的 `--env-file=.env`，部署时建议由平台注入环境变量。
+服务端环境变量见根目录 `.env.example`。`CREDIT_MEDIA_API_KEY` 优先于兼容变量 `IMAGE_API_KEY`，二者均不能通过任务或函数 options 传入。处理不透明产品图还需单独配置 `REMOVE_BG_API_KEY`；该 Key 仅服务端访问 remove.bg，透明素材不会产生该调用。`IMAGE_PROVIDER=none` 显式禁用，未配置生图 Key 时安全失败。模块不会自行加载 `.env`，独立调用时可使用 Node 的 `--env-file=.env`，部署时建议由平台注入环境变量。
 
 响应适配目前支持 OpenAI 风格 `data[0].b64_json` 或 `data[0].url`，此响应假设**尚未通过真实 Key 验证**。URL 结果由服务端下载再解码合成；只允许 `IMAGE_DOWNLOAD_HOSTS` 配置的精确 HTTPS 域名，不跟随重定向，不向下载请求转发 Key。如果真实响应使用另一 CDN，应由运维核验后添加精确域名，禁止通配放开下载。无轮询、无自动重试；单次 HTTP 生成与下载共享 `IMAGE_TIMEOUT_MS`，上限 300 秒。取消会终止本地 HTTP 等待和交付，不能承诺取消供应商已开始计费的远程任务（文档未提供任务取消接口）。
 
@@ -149,6 +149,44 @@ LLM_API_KEY=mock-test-key LLM_BASE_URL=https://example.invalid/v1 LLM_MODEL=mock
 
 ### 工作台待验收
 
-主流程调用、回退、取消传递和前端地址放行已实现，相关 mock 检查见 `tests/image-agent-integration.test.cjs`。仍需在本机安装正式依赖并配置图片 Key，重启 API 后通过工作台实际创作验证，包括生成资源 GET。真实 API 成果存在独立样例中，不等于工作台已经端到端验证。无实时进度流，取消不能保证供应商停止计费；自动抠图与自然场景融合仍待迭代。
+主流程调用、回退、取消传递和前端地址放行已实现，相关 mock 检查见 `tests/image-agent-integration.test.cjs`。仍需在本机安装正式依赖并配置图片 Key，重启 API 后通过工作台实际创作验证，包括生成资源 GET。真实 API 成果存在独立样例中，不等于工作台已经端到端验证。无实时进度流，取消不能保证供应商停止计费；自动抠图接口已接入但仍待真实密钥验收，自然场景融合仍待迭代。
 
-本机工作台的配置来自根目录 `.env`，而不是 `.env.image-playground`。配置 `CREDIT_MEDIA_API_KEY` 或 `IMAGE_API_KEY`、`IMAGE_MODEL=gpt-image-2`、`IMAGE_TIMEOUT_MS=180000`、`IMAGE_MAX_IMAGES=1`。不得自动将 `LLM_API_KEY` 当作图片 Key。改配置后重启 API；浏览器只读取同源生成资源。
+本机工作台的配置来自根目录 `.env`，而不是 `.env.image-playground`。配置 `CREDIT_MEDIA_API_KEY` 或 `IMAGE_API_KEY`、`IMAGE_MODEL=gpt-image-2`、`IMAGE_TIMEOUT_MS=180000`、`IMAGE_MAX_IMAGES=3`。不得自动将 `LLM_API_KEY` 当作图片 Key。改配置后重启 API；浏览器只读取同源生成资源。
+
+### 场景合成迭代
+
+提供 `task.visual_brief` 时优先采用完整背景描述，不再叠加默认模板装饰。背景提示和合成共用布局；3:4 请求输出 768×1024（当前供应商仍生成方图，服务端居中裁剪，非原生竖图）。透明素材仅裁掉全透明边缘，缩放后叠加独立柔和接触阴影；不根据白色猜测抠图，避免损伤银白色产品。带 alpha 通道但全部不透明的文件仍按不透明图处理。真实分割抠图通过 remove.bg 接入，仍待真实素材验收；参考图编辑尚未接入，阴影及视角适配属于近似合成，需要人工检查。
+
+### 商业海报背景与文字层
+
+MateBook 的 `task.visual_brief` 明确包含商业、发布会、Behance 或 CTA 意图，且未要求无文字时，启用 3:4 商业排版。背景提示按用户 `visual_brief` 的色彩、光线、环境和构图方向生成，不应注入用户未要求的山水等场景；服务端保留 API 背景，不再用固定渐变覆盖。官方产品原图放在中景，HUAWEI 品牌字、MATEBOOK 后景大字、确切型号和 CTA 用 SVG 合成。产品展示高度预留底部卖点栏，主体不旋转、不改画。
+
+底部最多显示四条短事实，必须来自本次传入 `evidence`，且 `model` 与任务型号完全一致、官方 HTTPS 来源、可检索且非 unavailable。按完整短行选取，不截断或补写数字。没有适合证据时不显示规格。独立试验台当前传入 `evidence: []`，因此不会自行去知识库补事实，也不会显示虚构参数；完整规格栏需主 Agent 传入符合契约的证据。品牌暂用文字，不手绘仿制官方花瓣 Logo，不添加未经确认的社媒账号或宣传口号。
+
+商业背景不再限定纯渐变影棚，可根据用户描述采用空间光影、抽象曲面与反射，默认避免未要求的山水。页脚包含华为消费者官网域名和社交平台名称（仅平台名，不代表已验证账号或链接）；未配置官方 Logo 素材或可核验社交账号时不伪造标识与账号。
+
+结果标记 `generation_mode: ai_background_composition`，提示背景由 AI 生成，主体和文字本地合成。API 失败会正常报错/由主流程回退官方图，不能把本地纯色图伪报成模型成功。画面仍需人工审核是否出现额外产品，以及光影、边缘和文字可读性；不承诺逐像素复刻参考图。
+
+### 场景自动选图试点（MateBook 14 鸿蒙版）
+
+本地试验台官方素材菜单新增“自动按场景选图”；手动选定文件时仍优先采用该文件。自动模式严格匹配 `productModel`，不把普通 MateBook 14 当作鸿蒙版。合盖/毛绒平铺选择已目视检查的原野绿 A 面透明 PNG；学习/图书馆/办公默认选择原野绿键盘俯视透明 PNG。背景生成收到对应俯拍视角约束。请求中的 `color` 或画面描述中的明确配色为硬约束，缺少对应角度、型号、配色或透明素材时在调用供应商前报错。响应回传 `source_product_image` 和 `source_filename` 供核对。
+
+选图函数位于 `services/api/src/agent/imageAgent/sourceSelection.cjs`，只对目视检查过的图片编号开放，不把所有 PNG 视为透明或完整产品图。线上工作台未修改；整合时可在已有 image_plan 生成前调用 `selectSourceAsset(input, candidates, plan)`，并将返回素材的 ID 绑定到规划。生产生成器仍尊重已确定的素材 ID，不会暗中更换主 Agent 的规划。
+
+验证：`node --test tests/image-agent.test.cjs tests/image-agent-playground.test.cjs`。测试使用真实知识库文件及模拟供应商背景，覆盖自动选图、手动优先、角度提示、来源回传及无匹配时零供应商调用；不代表真实生成效果已验收。
+
+### 2026-10-22 晚间：正式工作台接入验收
+
+- 正式入口仍为 5173 的“开始创作”→ `/api/v1/generate` → `taskAgent` → `integrateImages`。不需要另开生图试验台，也不要求修改前端。
+- 当前按任务中的精确产品型号动态筛选知识库素材，并在调用付费模型前检查本地 PNG 的实际透明度；不再将型号限定为 MateBook 14（鸿蒙版）。有明确配色时只接收能从素材元数据确认该配色的主体；明确要求俯拍时要求俯拍素材，日常图优先俯视但允许使用该型号其他可用视角。找不到透明、同型号且符合明确要求的素材时停止并保留官方图。当前每次仅替换一张，其余官方配图保留。
+- 正式任务支持可选 `visual_brief`，未提供时由服务端生成预设，用户无需手填完整 prompt。配色不指定时按匹配素材决定；其他型号仍沿用已有明确素材流程。
+- 实测已运行后端的正式 API 返回 HTTP 200、`generated: true`、`generation_mode: ai_background_composition`、`imageGeneration: success`；5173 代理生成资源 GET 200（约 2.49 MB）。该次完整接口耗时约 76 秒。此前进程尚未加载本轮选图补丁，不能将此结果算作补丁的浏览器验收。
+- 本轮选图补丁测试：40 项，39 通过、1 项环境分支跳过。真实知识库测试覆盖海报和日常选图、原槽位保留、无匹配时零付费调用。已重启 3000 后端，另行发起浏览器验收。
+- 合并验收：确认页面显示 AI 合成图、生成阶段成功、图片可加载；失败回退官方原图不能算 AI 生图成功。交付时包含服务端 sharp 依赖及锁文件、PNG Logo、全部 imageAgent 模块；不提交任何 .env 或 API Key。
+- 暂缓：多张 AI 图、其他型号自动匹配、图片效果优化、原生图像编辑、真实抠图服务验收；不阻塞当前一型号一张图的集成演示。
+
+注意：上文较早的“未安装依赖／未运行合成测试／未通过真实 Key 验证”等状态已经被本节验收结果部分更新。自动选图现已接入正式工作台，不再仅限试验台；仍需按本节区分旧进程实测和最新补丁浏览器验收。
+
+
+### 工作台独立生图入口
+在创作设定选择“仅生成图片（跳过文案审核）”，内容目标填写商业海报或日常生活照，点击开始创作。请求使用 `output_type: "image"`，仍执行需求规划、知识库检索和素材规划，但不执行文案生成及审稿。响应 `result_type: "image_generation"`，成功仅返回 AI 生成图片；图片服务未启用或生成失败时明确报告未生成，不以官方原图充当成功。当前一次生成一张 AI 合成图。其他型号需要具备精确匹配的透明产品素材；无匹配素材停止生成。

@@ -10,11 +10,13 @@ const PLATFORMS = require('./platformStrategies.cjs');
 
 function analyzeTask(input = {}) {
   const task = {
+    output_type: input.output_type === 'image' ? 'image' : 'article',
     audience: input.audience || '',
     scenario: input.scenario || '',
     goal: input.goal || '',
     platform: input.platform || '',
     model: input.model || '',
+    visual_brief: typeof input.visual_brief === 'string' ? input.visual_brief.slice(0, 4000) : '',
     requirements: Array.isArray(input.requirements) ? input.requirements : [],
     image_count: Number.isFinite(Number(input.image_count)) ? Math.max(0, Math.min(6, Math.floor(Number(input.image_count)))) : 6,
     include_price: Boolean(input.include_price),
@@ -103,7 +105,30 @@ async function generate(input, options = {}) {
   if (!usableEvidence.length) return { status: 'needs_confirmation', result_type: 'blocked', task, reply: '没有找到目标型号的可核验资料，已停止生成产品软文。请确认型号或补充本地产品事实资料。', validation: { status: 'fail', blocking_issues: ['缺少产品事实依据'] } };
   if (task.include_price && !usableEvidence.some((e) => e.source_status === 'vmall_official')) throw failure('PRICE_EVIDENCE_REQUIRED', '未获取到可核验的官方商城价格，请取消包含价格或补充资料后重试。');
   const assets = (options.creativeAssets || creativeAssets)(usableEvidence);
-  const strategy = await (options.planContent || planContent)({ task, evidence: usableEvidence, analysis: planned.value, platform, assets });
+  const imageOnly = task.output_type === 'image' || /(?:仅|只)(?:需要|要)?(?:生成|制作)?(?:图片|生图|海报|日常照|生活照)/.test(task.goal);
+  // Image-only creation does not need the article planner. The article planner
+  // may select the same asset more than once, which is invalid for an image
+  // task even though the image agent only needs one verified source subject.
+  const strategy = imageOnly
+    ? {
+      value: {
+        image_plan: Array.from({ length: Math.min(task.image_count || 1, 3) }, (_, index) => {
+          const asset = assets[index % assets.length];
+          return {
+          asset_id: asset.id,
+          placement: index === 0 ? 'cover' : 'inline',
+          after_paragraph: index === 0 ? 0 : index,
+          caption: asset.caption || asset.description || '官方产品图',
+          purpose: task.goal || '产品图片',
+          };
+        }),
+        conflicts: [],
+        fact_points: [],
+        asset_gap: assets.length ? '' : '请补充该型号的官方图片素材。',
+      },
+      meta: { model: 'deterministic-image-plan', status: 'success' },
+    }
+    : await (options.planContent || planContent)({ task, evidence: usableEvidence, analysis: planned.value, platform, assets });
   if (strategy.value.conflicts?.length) return {
     status: 'needs_confirmation', result_type: 'blocked', task, generation_mode: 'not_generated',
     reply: `资料存在冲突，已停止生成，请人工确认：\n${strategy.value.conflicts.map((c) => `- ${c.reason}`).join('\n')}`,
@@ -111,11 +136,30 @@ async function generate(input, options = {}) {
     validation: { status: 'fail', checks: { facts: 'fail' }, blocking_issues: strategy.value.conflicts.map((c) => c.reason), pending_confirmation: strategy.value.conflicts.map((c) => c.reason) },
     llm: { status: 'needs_confirmation', stages: [{ stage: 'analysis', ...planned.meta }, { stage: 'strategy', ...strategy.meta }] },
   };
-  let images = resolveImagePlan(strategy.value.image_plan, assets, task.image_count);
+  let images = resolveImagePlan(strategy.value.image_plan, assets, task.image_count, { allowRepeated: imageOnly });
   if (!images.length) return { status: 'needs_confirmation', result_type: 'blocked', task, generation_mode: 'not_generated', reply: `没有可用的同型号配图，暂不能交付图文软文。${strategy.value.asset_gap || '请补充该型号的图片与图片索引。'}`, validation: { status: 'fail', checks: { images: 'fail' }, blocking_issues: ['缺少同型号配图'] } };
-  assertGrounded(images.map(({ caption }) => caption).join('\n'), usableEvidence);
+  // Captions in image-only mode are display metadata, not generated claims.
+  // Article mode still grounds every model-selected caption against evidence.
+  if (!imageOnly) assertGrounded(images.map(({ caption }) => caption).join('\n'), usableEvidence);
   const context = { task, evidence: usableEvidence, analysis: planned.value, platform, strategy: strategy.value, images, history: task.history };
   const stages = [{ stage: 'analysis', ...planned.meta }, { stage: 'strategy', ...strategy.meta }];
+  if (imageOnly) {
+    const imageResult = await integrateImages({ task, evidence: usableEvidence, assets, platform, strategy: strategy.value }, images, options);
+    if (imageResult.stage) stages.push(imageResult.stage);
+    const generatedImages = imageResult.images.filter(image => image.generated === true);
+    const success = imageResult.stage?.status === 'success' && generatedImages.length > 0;
+    return {
+      request_id: `req_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      status: success ? 'success' : 'needs_confirmation', result_type: 'image_generation',
+      generation_mode: success ? 'llm' : 'not_generated', task,
+      images: success ? generatedImages : [],
+      reply: success ? undefined : `本次没有生成 AI 图片。${imageResult.warnings.join('；') || '图片服务未配置或未启用，请检查后端图片服务配置。'}`,
+      llm: { status: success ? 'success' : 'failed', stages, retrieval_queries: planned.value.retrieval_queries },
+      facts: usableEvidence.map(({ title, source_path, source_url }) => ({ title, source_path, source_url })),
+      warnings: imageResult.warnings,
+      validation: { status: success ? 'warning' : 'fail', checks: { images: success ? 'generated' : 'failed' }, pending_confirmation: ['产品外观与合成画面需人工核对'] },
+    };
+  }
   async function inspect(content) {
     const checked = await (options.reviewCopy || reviewCopy)({ ...context, content });
     const issues = [];

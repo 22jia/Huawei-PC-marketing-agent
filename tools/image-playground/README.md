@@ -3,16 +3,16 @@
 在正式仓库根目录运行：
 
 ```sh
-node scripts/image-playground.cjs
+node --watch-path=scripts --watch-path=services/api/src/agent/imageAgent scripts/image-playground.cjs
 ```
 
-然后打开 http://127.0.0.1:4318 。按 Ctrl+C 停止。默认端口占用时不会杀死其他服务；使用 `IMAGE_PLAYGROUND_PORT=4319 node scripts/image-playground.cjs` 换端口。
+然后打开 http://127.0.0.1:4318 。源代码改动会自动重启服务，页面刷新即可；生成中不要编辑后端代码。按 Ctrl+C 停止。默认端口占用时不会杀死其他服务；使用 `IMAGE_PLAYGROUND_PORT=4319 node --watch-path=scripts --watch-path=services/api/src/agent/imageAgent scripts/image-playground.cjs` 换端口。
 
 三种模式：
 
 - **离线演示**：固定的代码绘制示意 PNG，不需要 Key、网络或 sharp，也不消耗额度，不验证 API。
 - **直接生图**：调用真实媒体 API，检查提示词、模型与响应是否可用。不经过产品合成，也不能作为型号保真的官方产品图交付。
-- **官方产品图合成**：选择知识库中的官方图，通过 `generateCreativeImages` 测试素材处理、背景生成、合成、保存和返回。需要安装 sharp；不透明素材保持完整卡片，不做自动抠图。固定正方形，暂不测试平台画幅和文案策划。
+- **官方产品图合成**：先选择具体型号，再优先选择已检测透明像素的完整外观 PNG；不只凭扩展名判断透明。根据受众、场景、目标、平台和图片类型自动填写背景描述，可再手动调整。需要安装 sharp；透明图不需要背景移除 Key，不透明图仍需单独抠图服务。画幅由合成布局决定。
 
 真实 API 的 Key 只在本机仓库根目录的 `.env.image-playground` 配置（已被现有 `.gitignore` 的 `.env.*` 排除），不要提交此文件，不要在聊天中发送 Key：
 

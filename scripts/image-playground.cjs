@@ -30,14 +30,55 @@ function extension(buffer) {
   throw Object.assign(new Error('API 返回的文件不是支持的 PNG/JPEG/WebP 图片'), { code: 'IMAGE_INVALID_OUTPUT' });
 }
 let catalog;
+function assetPriority(asset) {
+  const name = `${asset.name || ''} ${asset.description || ''}`;
+  const transparentPng = asset.hasTransparency && /\.png$/i.test(asset.name || '');
+  const fullView = /经典开合外观|开合产品外观|正面产品展示|完整外观|多彩配色外观/.test(name);
+  const detail = /细节|键盘|接口|屏幕/.test(name);
+  return (transparentPng ? 0 : 8) + (fullView ? 0 : detail ? 4 : 2);
+}
+function selectCatalogAsset(items, data = {}) {
+  const { selectSourceAsset } = require('../services/api/src/agent/imageAgent/sourceSelection.cjs');
+  if (data.assetId) return items.find(({ asset }) => asset.id === data.assetId) || null;
+  const input = { task: { model: data.productModel, color: data.color, scenario: data.scenario, visual_brief: data.prompt, platform: data.platform, goal: data.goal } };
+  const asset = selectSourceAsset(input, items.map(item => item.asset), { purpose: data.style || data.prompt });
+  return items.find(item => item.asset.id === asset.id);
+}
+
 function products() {
   if (!catalog) {
     const { getSpotlightProducts } = require('../services/api/src/services/productSpotlight.cjs');
     const { creativeAssets } = require('../services/api/src/services/creativeAssets.cjs');
-    catalog = getSpotlightProducts().flatMap((product) => creativeAssets([{ source_path: product.source_path, title: product.name }]).slice(0, 4).map((asset) => ({ asset, product: product.name })));
-    catalog = [...new Map(catalog.map((item) => [item.asset.id, item])).values()];
+    catalog = getSpotlightProducts().flatMap((product) => creativeAssets([{ source_path: product.source_path, title: product.name }]).map((asset) => ({ asset, product: product.name })));
+    catalog = [...new Map(catalog.map((item) => [item.asset.id, item])).values()]
+      .sort((a, b) => assetPriority(a.asset) - assetPriority(b.asset));
   }
   return catalog;
+}
+let transparentCatalog;
+async function productsWithTransparency() {
+  if (!transparentCatalog) transparentCatalog = (async () => {
+    let sharp;
+    try { sharp = require('../services/api/node_modules/sharp'); } catch { return products().map((item) => ({ ...item, asset: { ...item.asset, hasTransparency: false } })); }
+    return Promise.all(products().map(async (item) => {
+      let hasTransparency = false;
+      if (/\.png$/i.test(item.asset.name)) {
+        try {
+          const { resolveProductImage } = require('../services/api/src/services/productSpotlight.cjs');
+          const file = resolveProductImage(item.asset.source_path);
+          if (file) {
+            const metadata = await sharp(file, { limitInputPixels: 25000000 }).metadata();
+            if (metadata.hasAlpha) {
+              const { data, info } = await sharp(file, { limitInputPixels: 25000000 }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+              for (let offset = 3; offset < data.length; offset += info.channels) if (data[offset] < 255) { hasTransparency = true; break; }
+            }
+          }
+        } catch {}
+      }
+      return { ...item, asset: { ...item.asset, hasTransparency } };
+    }));
+  })();
+  return transparentCatalog;
 }
 function json(response, status, value) { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); }
 async function readJson(request) {
@@ -59,13 +100,13 @@ function createPlayground({ providerFactory = createHttpProvider, storageRoot = 
       }
       const files = { '/app.js': ['app.js', 'application/javascript'], '/style.css': ['style.css', 'text/css'] };
       if (request.method === 'GET' && files[url.pathname]) {
-        const [file, type] = files[url.pathname]; response.writeHead(200, { 'Content-Type': type }); return response.end(fs.readFileSync(path.join(repo, 'tools/image-playground', file)));
+        const [file, type] = files[url.pathname]; response.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' }); return response.end(fs.readFileSync(path.join(repo, 'tools/image-playground', file)));
       }
       if (request.method === 'GET' && url.pathname === '/status') {
         let processor = false; try { require('../services/api/node_modules/sharp'); processor = true; } catch {}
-        return json(response, 200, { configured: Boolean(process.env.CREDIT_MEDIA_API_KEY || process.env.IMAGE_API_KEY), processor, models });
+        return json(response, 200, { configured: Boolean(process.env.CREDIT_MEDIA_API_KEY || process.env.IMAGE_API_KEY), cutoutConfigured: Boolean(process.env.REMOVE_BG_API_KEY), processor, models, diagnosticVersion: 3 });
       }
-      if (request.method === 'GET' && url.pathname === '/products') return json(response, 200, products().map(({ asset, product }) => ({ id: asset.id, product, description: asset.description, url: `/official-image?id=${encodeURIComponent(asset.id)}` })));
+      if (request.method === 'GET' && url.pathname === '/products') return json(response, 200, (await productsWithTransparency()).map(({ asset, product }) => ({ id: asset.id, product, model: asset.model || product, name: asset.name, description: asset.description, hasTransparency: asset.hasTransparency, url: `/official-image?id=${encodeURIComponent(asset.id)}` })));
       if (request.method === 'GET' && url.pathname === '/official-image') {
         const item = products().find(({ asset }) => asset.id === url.searchParams.get('id'));
         if (!item) return json(response, 404, { message: '素材不存在' });
@@ -96,14 +137,18 @@ function createPlayground({ providerFactory = createHttpProvider, storageRoot = 
           const stored = saveGeneratedImage(demoPng(), 'png', { root: storageRoot, signal: controller.signal });
           return json(response, 200, { url: stored.url, message: '离线演示：这是固定示意图，不是 AI 生成，没有消耗额度，也未验证外部接口。', warnings: [] });
         }
-        const provider = providerFactory({ model: data.model, size: '1024x1024', timeoutMs: Number(process.env.IMAGE_TIMEOUT_MS || 120000) });
         if (data.mode === 'product') {
-          const item = products().find(({ asset }) => asset.id === data.assetId);
+          const item = selectCatalogAsset(await productsWithTransparency(), data);
           if (!item) return json(response, 400, { message: '请选择官方产品素材' });
-          const input = { task: { model: item.asset.model || item.product, audience: '产品潜在用户', scenario: data.prompt.trim(), goal: '本地图片效果测试', platform: 'xiaohongshu', image_count: 1 }, evidence: [], assets: [item.asset], platform: { label: '小红书' }, strategy: { image_plan: [{ asset_id: item.asset.id, placement: 'cover', after_paragraph: 0, caption: '官方产品图场景拼贴', purpose: '检查官方主体保真与背景效果' }] } };
+          // The selected catalog asset is the source of truth for variant details.
+          // Do not reject a valid model merely because its filename omits a color name.
+          if (!item.asset.model) return json(response, 400, { code: 'IMAGE_MATCH_REQUIRED', message: '所选官方素材没有确认完整型号，已停止生成。' });
+          const input = { task: { model: item.asset.model, audience: data.audience || '产品潜在用户', scenario: data.scenario || data.prompt.trim(), goal: data.goal || '本地图片效果测试', platform: data.platform || 'xiaohongshu', image_count: 1, visual_brief: data.prompt.trim() }, evidence: [], assets: [item.asset], platform: { label: data.platform || '小红书' }, strategy: { image_plan: [{ asset_id: item.asset.id, placement: 'cover', after_paragraph: 0, caption: '官方产品图场景拼贴', purpose: data.style || data.prompt.trim() }] } };
+          const provider = { generate(request, options) { return providerFactory({ model: data.model, size: '1024x1024', timeoutMs: Number(process.env.IMAGE_TIMEOUT_MS || 120000) }).generate(request, options); } };
           const result = await generateCreativeImages(input, { provider, signal: controller.signal, root: storageRoot });
-          return json(response, 200, { url: result.images[0].url, message: '子 Agent 模块合成结果（仅本地测试）', warnings: result.warnings });
+          return json(response, 200, { url: result.images[0].url, message: '图片模型生成背景，官方产品主体与已核验文字由本地合成（仅本地测试）', warnings: result.warnings, source_product_image: result.images[0].source_product_image, source_filename: item.asset.name });
         }
+        const provider = providerFactory({ model: data.model, size: '1024x1024', timeoutMs: Number(process.env.IMAGE_TIMEOUT_MS || 120000) });
         const outputs = await provider.generate({ prompt: data.prompt.trim() }, { signal: controller.signal });
         const buffer = outputs[0]?.buffer;
         if (!Buffer.isBuffer(buffer)) throw new Error('API 未返回图片文件');
@@ -121,4 +166,4 @@ if (require.main === module) {
   server.on('error', (error) => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已占用，请设置 IMAGE_PLAYGROUND_PORT 换一个端口。` : `测试页启动失败：${error.code}`); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => console.log(`生图独立测试页：http://127.0.0.1:${server.address().port}\n只加载 .env.image-playground；不会启动团队前端或主 Agent。`));
 }
-module.exports = { createPlayground, demoPng, extension };
+module.exports = { createPlayground, demoPng, extension, assetPriority, selectCatalogAsset };

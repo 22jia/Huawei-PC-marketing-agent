@@ -19,6 +19,34 @@ function timeoutSignal(parent, timeoutMs) {
   return { signal: controller.signal, cleanup() { clearTimeout(timer); parent?.removeEventListener('abort', abort); } };
 }
 
+function transportFailure(error) {
+  const code = error?.cause?.code || error?.cause?.cause?.code || error?.code;
+  const known = {
+    ENOTFOUND: ['IMAGE_PROVIDER_DNS_FAILED', '图片服务域名无法解析（ENOTFOUND）'],
+    EAI_AGAIN: ['IMAGE_PROVIDER_DNS_FAILED', '图片服务域名暂时无法解析（EAI_AGAIN）'],
+    ECONNRESET: ['IMAGE_PROVIDER_CONNECTION_CLOSED', '图片服务连接被对端重置（ECONNRESET）'],
+    UND_ERR_SOCKET: ['IMAGE_PROVIDER_CONNECTION_CLOSED', '图片服务连接中断（UND_ERR_SOCKET）'],
+    ETIMEDOUT: ['IMAGE_PROVIDER_TIMEOUT', '连接图片服务超时（ETIMEDOUT）'],
+    UND_ERR_CONNECT_TIMEOUT: ['IMAGE_PROVIDER_TIMEOUT', '连接图片服务超时（UND_ERR_CONNECT_TIMEOUT）'],
+    ECONNREFUSED: ['IMAGE_PROVIDER_CONNECTION_REFUSED', '图片服务拒绝连接（ECONNREFUSED）'],
+  };
+  const safeCode = typeof code === 'string' && /^[A-Z0-9_]{2,48}$/.test(code) ? code : null;
+  const [failureCode, message] = known[code] || (safeCode
+    ? ['IMAGE_PROVIDER_TRANSPORT_FAILED', `图片服务网络请求失败（${safeCode}）`]
+    : ['IMAGE_PROVIDER_REQUEST_FAILED', '图片服务请求失败；未取得可识别的网络错误码']);
+  return new ImageProviderError(failureCode, message);
+}
+
+function httpFailure(status) {
+  const details = {
+    401: '图片服务返回 HTTP 401：请核对图片 Key。',
+    403: '图片服务返回 HTTP 403：当前 Key 可能没有此图片模型权限。',
+    402: '图片服务返回 HTTP 402：请检查图片额度。',
+    429: '图片服务返回 HTTP 429：请求过多，请稍后再试。',
+  };
+  return new ImageProviderError('IMAGE_PROVIDER_HTTP_ERROR', details[status] || `图片服务返回 HTTP ${status}`);
+}
+
 async function readLimited(response, maxBytes) {
   if (Number(response.headers.get('content-length')) > maxBytes) throw new ImageProviderError('IMAGE_TOO_LARGE', '图片服务响应超过大小限制');
   const reader = response.body?.getReader();
@@ -64,7 +92,7 @@ function createHttpProvider(config = {}) {
           body: JSON.stringify({ model, prompt: input.prompt, size }),
           signal: bounded.signal,
         });
-        if (!response.ok) throw new ImageProviderError('IMAGE_PROVIDER_HTTP_ERROR', `图片服务返回 HTTP ${response.status}`);
+        if (!response.ok) throw httpFailure(response.status);
         let payload;
         try { payload = JSON.parse((await readLimited(response, 18 * 1024 * 1024)).toString('utf8')); }
         catch (error) { if (error instanceof ImageProviderError) throw error; throw new ImageProviderError('IMAGE_PROVIDER_SCHEMA_ERROR', '图片服务返回的 JSON 无效'); }
@@ -91,7 +119,7 @@ function createHttpProvider(config = {}) {
         assertActive(options.signal);
         if (bounded.signal.aborted) throw new ImageProviderError('IMAGE_PROVIDER_TIMEOUT', '图片服务请求超时');
         if (error instanceof ImageProviderError) throw error;
-        throw new ImageProviderError('IMAGE_PROVIDER_REQUEST_FAILED', '图片服务请求失败');
+        throw transportFailure(error);
       } finally { bounded.cleanup(); }
     },
   };
@@ -108,4 +136,4 @@ function createProvider(options = {}) {
 function mockProvider(images = []) {
   return { id: 'mock', async generate() { return images.map((image) => ({ ...image })); } };
 }
-module.exports = { ImageProviderError, assertActive, createProvider, createHttpProvider, mockProvider, timeoutSignal };
+module.exports = { ImageProviderError, assertActive, createProvider, createHttpProvider, mockProvider, timeoutSignal, transportFailure, httpFailure };
