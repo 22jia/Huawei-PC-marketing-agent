@@ -11,6 +11,7 @@ const productSpotlight = require('./services/productSpotlight.cjs');
 const platformStrategies = require('./agent/platformStrategies.cjs');
 const { fetchOfferRules } = require('./services/storeOfferRules.cjs');
 const { queryChannelPrices } = require('./services/channelPriceService.cjs');
+const { resolveGeneratedImage, MIME_TYPES } = require('./agent/imageAgent/storage.cjs');
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -65,6 +66,16 @@ async function route(request, response) {
       const type = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[path.extname(imagePath).toLowerCase()];
       response.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=3600' });
       return fs.createReadStream(imagePath).pipe(response);
+    }
+    const generatedAssetMatch = url.pathname.match(/^\/api\/v1\/generated-assets\/([^/]+)$/);
+    if (method === 'GET' && generatedAssetMatch) {
+      const generatedPath = resolveGeneratedImage(generatedAssetMatch[1]);
+      if (!generatedPath) return sendJson(response, 404, { status: 'error', code: 'GENERATED_ASSET_NOT_FOUND', message: '生成图片不存在', request_id: id });
+      const type = MIME_TYPES[path.extname(generatedPath).slice(1).toLowerCase()] || 'application/octet-stream';
+      response.writeHead(200, { 'Content-Type': type, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=86400, immutable' });
+      const stream = fs.createReadStream(generatedPath);
+      stream.on('error', () => response.destroy());
+      return stream.pipe(response);
     }
     const ticketMatch = url.pathname.match(/^\/api\/v1\/tickets\/([^/]+)(?:\/follow-ups)?$/);
     const isTicketFollowUp = /^\/api\/v1\/tickets\/[^/]+\/follow-ups$/.test(url.pathname);
@@ -157,8 +168,14 @@ async function route(request, response) {
       });
     }
     if (url.pathname === '/api/v1/generate') {
-      const result = await generate(body);
-      return sendJson(response, result.status === 'needs_clarification' ? 200 : 200, { request_id: id, ...result });
+      const controller = new AbortController();
+      const disconnect = () => { if (!response.writableEnded) controller.abort(); };
+      response.on('close', disconnect);
+      try {
+        const result = await generate(body, { signal: controller.signal });
+        if (!controller.signal.aborted) return sendJson(response, 200, { request_id: id, ...result });
+        return;
+      } finally { response.removeListener('close', disconnect); }
     }
     if (url.pathname === '/api/v1/export') {
       if (!body.content || !body.format) return sendJson(response, 400, { status: 'error', code: 'MISSING_REQUIRED_FIELD', message: '缺少 content 或 format 字段', request_id: id });

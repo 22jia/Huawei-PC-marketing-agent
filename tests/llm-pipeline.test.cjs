@@ -1,4 +1,6 @@
 const test = require('node:test');
+// Keep copy-only tests independent of local media credentials and paid providers.
+process.env.IMAGE_PROVIDER = 'none';
 const assert = require('node:assert/strict');
 const { generate } = require('../services/api/src/agent/taskAgent.cjs');
 const { assistCustomer } = require('../services/api/src/agent/customerAgent.cjs');
@@ -91,6 +93,30 @@ test('OLED and colour gamut alone cannot support eye health promises', async () 
   assert.throws(() => assertGrounded('让你不再有视觉负担。', [{ content: 'OLED屏幕', source_status: 'local_snapshot' }]), { code: 'UNSUPPORTED_CLAIM' });
 });
 
+test('selected strategy facts limit which real specifications may enter the draft', async () => {
+  const { assertGrounded } = require('../services/api/src/agent/agentRuntime.cjs');
+  const docs = [{ content: '14.2 英寸\nOLED（抗反射屏）\n屏幕比例\n3:2\n分辨率\n2880 × 1920，243 PPI', source_path: 'P1-product/产品事实.md', source_status: 'local_snapshot' }];
+  const selected = [{ fact: '14.2 英寸', quote: '14.2 英寸' }];
+  assert.doesNotThrow(() => assertGrounded('屏幕尺寸为14.2英寸。', docs, selected));
+  assert.throws(() => assertGrounded('14.2英寸OLED，比例3:2，分辨率2880 × 1920。', docs, selected), { code: 'UNSUPPORTED_CLAIM' });
+  assert.throws(() => assertGrounded('14.2英寸OLED。', docs, [{ fact: '14.2英寸 OLED', quote: '14.2 英寸' }]), { code: 'UNSUPPORTED_CLAIM' });
+});
+
+test('unselected but real display specifications trigger a grounded rewrite', async () => {
+  let generations = 0;
+  const selectedStrategy = { ...editorialOptions, planContent: async () => ({ value: { angle: '屏幕选购', reader_tension: '核对需求', platform_reason: '具体场景', outline: ['体验'], evidence_ids: ['E1'], fact_points: [{ fact: '屏幕尺寸为14.2英寸', evidence_id: 'E1', quote: '14.2 英寸' }], conflicts: [], image_plan: [{ asset_id: 'test-image', placement: 'cover', after_paragraph: 0, caption: '官方产品图', purpose: '封面' }], asset_gap: '' }, meta }) };
+  const r = await generate(task, { ...options, ...selectedStrategy,
+    generateCopy: async ({ feedback }) => {
+      generations++;
+      if (generations === 2) assert.match(feedback.join(' '), /fact_points/);
+      return { content: { title: '屏幕选购', body: generations === 1 ? '14.2英寸OLED，比例3:2，分辨率2880 × 1920。' : '屏幕尺寸为14.2英寸。', hashtags: [], cta: '带上课件到店体验' }, meta };
+    },
+  });
+  assert.equal(generations, 2);
+  assert.equal(r.editorial_review.revision_count, 1);
+  assert.doesNotMatch(r.content.body, /OLED|3:2|2880/);
+});
+
 test('unsupported health copy is automatically rewritten with feedback before delivery', async () => {
   let calls = 0, reviews = 0;
   const r = await generate(task, { ...options,
@@ -166,6 +192,48 @@ test('an unrelated reply does not silently choose a product version', async () =
   });
   assert.equal(r.status, 'needs_clarification');
 });
+test('text request timeout can be configured and rejects unbounded values before calling provider', async () => {
+  const previous = process.env.LLM_TIMEOUT_MS;
+  try {
+    process.env.LLM_TIMEOUT_MS = '180000';
+    await requestJson('test', {}, { fetch: async (_url, request) => {
+      assert.equal(request.signal.aborted, false);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }) };
+    } });
+    for (const timeoutMs of [0, -1, 300001, NaN]) {
+      await assert.rejects(requestJson('test', {}, { timeoutMs, fetch: async () => assert.fail('must not call provider') }), { code: 'LLM_INVALID_CONFIG' });
+    }
+  } finally {
+    if (previous === undefined) delete process.env.LLM_TIMEOUT_MS;
+    else process.env.LLM_TIMEOUT_MS = previous;
+  }
+});
+
+test('bounded timeout and model temperature compatibility survive integration together', async () => {
+  const previousModel = process.env.LLM_MODEL;
+  const previousTimeout = process.env.LLM_TIMEOUT_MS;
+  try {
+    process.env.LLM_TIMEOUT_MS = '180000';
+    for (const model of ['o4-mini', 'o4-mini-2025-04-16', 'test-model']) {
+      process.env.LLM_MODEL = model;
+      await requestJson('test', {}, { fetch: async (_url, request) => {
+        const payload = JSON.parse(request.body);
+        assert.equal(payload.model, model);
+        assert.equal(request.signal.aborted, false);
+        if (model.startsWith('o4-mini')) assert.equal(Object.hasOwn(payload, 'temperature'), false);
+        else assert.equal(payload.temperature, 0.3);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }) };
+      } });
+    }
+    await assert.rejects(requestJson('test', {}, { timeoutMs: 300001, fetch: async () => assert.fail('must not call provider') }), { code: 'LLM_INVALID_CONFIG' });
+  } finally {
+    if (previousModel === undefined) delete process.env.LLM_MODEL;
+    else process.env.LLM_MODEL = previousModel;
+    if (previousTimeout === undefined) delete process.env.LLM_TIMEOUT_MS;
+    else process.env.LLM_TIMEOUT_MS = previousTimeout;
+  }
+});
+
 test('HTTP and invalid JSON responses become safe diagnostic errors', async () => {
   await assert.rejects(requestJson('test', {}, { fetch: async () => ({ ok: false, status: 401 }) }), { code: 'LLM_HTTP_ERROR' });
   await assert.rejects(requestJson('test', {}, { fetch: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'not json' } }] }) }) }), { code: 'LLM_INVALID_JSON' });

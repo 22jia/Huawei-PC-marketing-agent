@@ -1,0 +1,8 @@
+{
+  "name": "huawei-pc-marketing-api",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "sharp": "0.34.5"
+  }
+}
