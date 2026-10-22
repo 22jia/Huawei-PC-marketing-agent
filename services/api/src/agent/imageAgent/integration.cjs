@@ -32,7 +32,10 @@ async function workbenchInput(input, selected) {
   const visual_brief = input.task.visual_brief || (style.style?.group === 'poster'
     ? `生成3:4高级商业产品宣传海报，产品为${input.task.model}，品牌华为。现代极简科技广告，配色与官方产品原色协调；高级棚拍光影、空间层次、轻微悬浮及柔和阴影。背景超大英文排版，银白渐变文字，底部 EXPLORE NOW CTA 和官网信息，Behance 产品发布会质感。未要求时不添加山水。产品主体使用官方原图，不重新绘制，不编造参数。`
     : `生成3:4竖版INS风真实日常生活照片，场景为${input.task.scenario}。柔和窗光，真实木纹或织物，少量小型生活道具置于边缘，电脑为唯一主体，比例真实，接触阴影自然，无文字无水印。`);
-  return { selected, input: { ...input, task: { ...input.task, visual_brief }, assets: selected } };
+  // Placements may reuse one official subject for several generated variants.
+  // The source catalog, unlike the placement plan, must contain unique IDs.
+  const sources = [...new Map(selected.map(asset => [asset.id, asset])).values()];
+  return { selected, input: { ...input, task: { ...input.task, visual_brief }, assets: sources } };
 }
 
 // Only replace reviewed placements. Configuration and credentials stay server-side.
@@ -63,14 +66,18 @@ async function integrateImages(input, officialImages, options = {}) {
       throw new ImageProviderError('IMAGE_INVALID_OUTPUT', '图片结果结构不符合约定');
     }
     const replacements = new Map();
-    for (const image of result.images) {
+    for (const [index, image] of result.images.entries()) {
       const source = sources.get(image?.source_product_image);
+      // One official subject may intentionally back several image variants.
+      // Validate placement metadata against the ordered plan slot in that mode;
+      // the source catalog itself remains deduplicated by ID.
+      const expected = allowRepeatedSubject ? selected[index] : source;
       if (!source || (!allowRepeatedSubject && seen.has(source.id)) || !image.id || typeof image.id !== 'string' ||
         image.generated !== true || image.model !== input.task.model || image.source_url !== source.source_url ||
         !/^\/api\/v1\/generated-assets\/[A-Za-z0-9_-]+\.(png|jpe?g|webp)$/.test(image.url || '') ||
         !image.description || typeof image.description !== 'string' ||
-        image.placement !== source.placement || image.after_paragraph !== source.after_paragraph ||
-        image.caption !== source.caption || image.purpose !== source.purpose) {
+        !expected || image.placement !== expected.placement || image.after_paragraph !== expected.after_paragraph ||
+        image.caption !== expected.caption || image.purpose !== expected.purpose) {
         throw new ImageProviderError('IMAGE_INVALID_OUTPUT', '图片型号、来源或展示位置不符合约定');
       }
       seen.add(source.id);

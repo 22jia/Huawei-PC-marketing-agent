@@ -2,6 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { integrateImages } = require('../services/api/src/agent/imageAgent/integration.cjs');
 const { generate } = require('../services/api/src/agent/taskAgent.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const sharp = require('../services/api/node_modules/sharp');
 const source = { id: 'official', model: '测试型号', source_path: 'P1-产品参数库/01-鸿蒙电脑/HUAWEI MateBook 14/images/hwpc_matebook-14-harmonyos_深空灰沉稳配色_05.png', source_url: 'https://consumer.huawei.com/cn/',
   url: '/api/v1/products/image?path=test.png', description: '官方产品图', placement: 'cover', after_paragraph: 0, caption: '官方产品图', purpose: '封面' };
 const input = { task: { model: '测试型号', image_count: 2 }, assets: [source], evidence: [], platform: {}, strategy: {} };
@@ -178,4 +182,33 @@ test('Ultra workbench uses full exact-model derived subject for poster and daily
     assert.equal(result.stage.status, 'success', JSON.stringify(result.warnings));
     assert.equal(result.images[0].source_product_image, hero.id);
   }
+});
+
+test('three image variants reuse one official subject without duplicate-source rejection', async (t) => {
+  const { creativeAssets } = require('../services/api/src/services/creativeAssets.cjs');
+  const { generateCreativeImages } = require('../services/api/src/agent/imageAgent/index.cjs');
+  const model = 'HUAWEI MateBook 14（鸿蒙版）';
+  const assets = creativeAssets([{ title: `${model} - 产品事实`, source_path: 'P1-产品参数库/01-鸿蒙电脑/HUAWEI MateBook 14/产品事实.md' }]);
+  const official = assets.find(asset => asset.source_url);
+  assert.ok(official, 'an exact-model transparent official subject is required');
+  const placements = ['cover', 'inline', 'closing'].map((placement, index) => ({ ...official, placement, after_paragraph: index, caption: `变体${index + 1}`, purpose: `海报${index + 1}` }));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'image-agent-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const background = await sharp({ create: { width: 1200, height: 1600, channels: 3, background: '#d9dde5' } }).png().toBuffer();
+  let captured;
+  const result = await integrateImages({
+    task: { model, goal: '高级商业海报', output_type: 'image', image_count: 3, platform: 'wechat_moments', scenario: '产品发布' },
+    assets, evidence: [], platform: { label: '朋友圈' }, strategy: {},
+  }, placements, {
+    generateCreativeImages: (value, options) => {
+      captured = value;
+      return generateCreativeImages(value, { ...options, root, provider: { id: 'test', generate: async () => [{ buffer: background }] } });
+    },
+  });
+  assert.equal(result.stage.status, 'success', JSON.stringify(result.warnings));
+  assert.equal(result.images.length, 3);
+  assert.equal(new Set(result.images.map(image => image.id)).size, 3);
+  assert.equal(captured.assets.length, 1);
+  assert.equal(captured.strategy.image_plan.length, 3);
+  assert.deepEqual(result.images.map(image => image.placement), ['cover', 'inline', 'closing']);
 });
