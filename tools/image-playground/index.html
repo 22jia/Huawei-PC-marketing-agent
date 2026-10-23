@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>生图试验台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><header><div><h1>生图试验台</h1><p>先看图片效果，再接团队的创作流程。</p></div><span class="isolation">独立本地测试</span></header>
+<main><section class="controls" aria-label="生成设置"><form id="form">
+<label for="mode">你想测试什么</label><select id="mode"><option value="demo">离线演示 · 不消耗额度</option><option value="direct">直接生图 · 真实 API</option><option value="product">官方产品图合成 · 子 Agent</option></select><p class="hint" id="mode-hint"></p>
+<label for="model">生图模型</label><select id="model"><option>gpt-image-2</option></select>
+<div id="product-controls" hidden><label for="product-model">知识库型号</label><select id="product-model"><option value="">正在读取型号…</option></select><label for="asset">官方产品图片</label><select id="asset"><option value="">正在读取素材…</option></select><img id="source" alt="选中的官方产品素材" hidden><p id="asset-match" class="hint">默认优先使用已检测到透明背景的完整外观 PNG；选择后核对原图与型号。</p></div>
+<label for="audience">目标受众</label><input id="audience" value="大学生"><label for="scenario">使用场景</label><input id="scenario" value="学习"><label for="goal">内容目标</label><input id="goal" value="种草"><label for="platform">发布平台</label><select id="platform"><option value="xiaohongshu">小红书</option><option value="wechat_moments">微信朋友圈</option><option value="douyin">抖音</option><option value="weibo">微博</option></select><p class="hint">产品合成会根据这些字段自动选择风格；必须选择已绑定完整型号的知识库素材，素材版本与配色以所选官方图片为准。</p>
+<label for="visual-kind">图片类型</label><select id="visual-kind"><option value="daily">日常生活照</option><option value="poster">商业宣传海报</option></select>
+<label for="prompt">自动生成的画面描述</label><textarea id="prompt" rows="7" maxlength="4000" required></textarea><div class="actions"><button id="reset-prompt" type="button">按当前字段重新生成描述</button></div><p class="hint">字段变化时自动更新描述；手动编辑后保留自定义版本，可点击上方按钮重新应用当前字段。</p>
+<p class="hint">每次生成 1 张。真实生成会使用黑客松额度。</p>
+<div class="actions"><button id="generate" type="submit">运行离线演示</button><button id="cancel" type="button" hidden>停止等待</button></div>
+<p id="environment" class="environment" role="status">正在检查本地配置…</p>
+<details><summary>第一次使用：如何配置 Key</summary><p>在仓库根目录创建 <code>.env.image-playground</code>，写入：</p><pre>CREDIT_MEDIA_API_KEY=你的黑客松Key
+REMOVE_BG_API_KEY=你的remove.bgKey
+IMAGE_TIMEOUT_MS=120000</pre><p>图片 Key 用于生图；remove.bg Key 用于将不透明官方产品图去背景。请在 remove.bg 获取独立 Key 并确认账户额度。两个 Key 都只保存在本地服务端，不要填入画面描述或提交到 Git。</p><p>保存后重启测试服务。产品合成还需要在终端运行：</p><pre>npm install --prefix services/api</pre><p>如果没有配置抠图 Key，带背景的官方图会停止并显示原因，不会再以白底方块冒充抠图结果。已透明素材无需该 Key。</p></details>
+</form></section>
+<section class="preview" aria-label="生成结果"><div class="preview-heading"><h2>出图预览</h2><a id="download" hidden download>保存图片</a></div><div class="canvas"><div id="empty"><span class="placeholder" aria-hidden="true">＋</span><p>描述你想看到的画面</p><small>在左侧选择模式，点击生成后查看结果。</small></div><img id="result" alt="本次生成结果" hidden></div><p id="status" role="status" aria-live="polite">还没有生成图片。</p><ul id="warnings"></ul><p class="footnote">这里测试图片模块，不会运行团队文案生成、客户助手或共享前端。</p></section></main></body></html>

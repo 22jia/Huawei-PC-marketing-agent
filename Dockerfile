@@ -14,6 +14,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default
 WORKDIR /app
 COPY services/api/ /app/services/api/
+RUN npm install --prefix /app/services/api --omit=dev
 COPY scripts/start-api.cjs /app/scripts/start-api.cjs
 COPY 华为PC全板块深度知识库_v7/ /app/华为PC全板块深度知识库_v7/
 COPY 素材总清单_2026-10-18.md /app/素材总清单_2026-10-18.md

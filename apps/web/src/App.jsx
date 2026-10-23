@@ -30,6 +30,7 @@ const marketingInitialValues = {
   model: 'HUAWEI MateBook 14',
   requirements: ['突出便携', '突出屏幕体验'],
   include_price: false,
+  image_count: 3,
 };
 
 const customerInitialValues = {
@@ -114,6 +115,17 @@ function LegacyMarketingWorkbench({ messageApi }) {
 
 function MarketingWorkbench({ messageApi }) {
   const [form] = Form.useForm();
+  const imageOnly = Form.useWatch('output_type', form) === 'image';
+  const [modelOptions, setModelOptions] = useState([]);
+  const [modelLoadError, setModelLoadError] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/v1/products/spotlight', { signal: controller.signal })
+      .then(response => { if (!response.ok) throw new Error('产品目录加载失败'); return response.json(); })
+      .then(data => setModelOptions([...new Set(data.items.map(item => item.name))].map(name => ({ value: name, label: name }))))
+      .catch(error => { if (error.name !== 'AbortError') setModelLoadError(true); });
+    return () => controller.abort();
+  }, []);
   const [result, setResult] = useState(null);
   const [runResult, setRunResult] = useState(null);
   const artifactRef = useRef(null);
@@ -137,6 +149,10 @@ function MarketingWorkbench({ messageApi }) {
           form.setFieldsValue(updates);
         }
         setRunResult(data);
+        if (data.result_type === 'image_generation' && data.images?.length) {
+          setResult(data);
+          return { content: [{ type: 'text', text: creativeReport(data) }] };
+        }
         if (data.reply) return { content: [{ type: 'text', text: data.reply }] };
         if (!data.content) return { content: [{ type: 'text', text: `${data.task?.questions?.map((q) => q.question).join('\n') || '请补充任务信息。'}\n直接在这里回复即可，我会继续处理。` }] };
         artifactRef.current = data.content;
@@ -153,12 +169,14 @@ function MarketingWorkbench({ messageApi }) {
   }
   return <div className="studio-workbench"><CreativeThread adapter={adapter}>{(runtime) => <>
     <aside className="brief-panel"><div className="panel-eyebrow"><Settings2 size={15} /> 创作设定 <span>BRIEF</span></div><h3>好内容，始于好场景。</h3><p className="brief-description">告诉我，为谁而写，在哪打动他。</p>
-      <Form form={form} layout="vertical" initialValues={marketingInitialValues} onFinish={() => runtime.thread.append({ role: 'user', content: [{ type: 'text', text: '根据当前创作设定，写一篇适合所选平台的场景化营销文案。' }] })}>
+      <Form form={form} layout="vertical" initialValues={marketingInitialValues} onFinish={() => runtime.thread.append({ role: 'user', content: [{ type: 'text', text: form.getFieldValue('output_type') === 'image' ? '根据当前创作设定，仅生成图片，不生成文案。' : '根据当前创作设定，写一篇适合所选平台的场景化营销文案。' }] })}>
+        <Form.Item name="output_type" label="创作类型" initialValue="article"><Select onChange={value => { if (value === 'image') form.setFieldValue('goal', '商业宣传海报'); }} options={[{ value: 'article', label: '图文创作' }, { value: 'image', label: '仅生成图片（跳过文案审核）' }]} /></Form.Item>
         <Form.Item name="platform" label="发布平台"><Select showSearch optionFilterProp="label" placeholder="选择发布平台，也可以在对话中指定" options={[{ value: 'xiaohongshu', label: '小红书' }, { value: 'wechat', label: '微信公众号' }, { value: 'wechat_moments', label: '微信朋友圈' }, { value: 'douyin', label: '抖音' }, { value: 'weibo', label: '微博' }, { value: 'bilibili', label: '哔哩哔哩' }]} /></Form.Item>
-        <Form.Item name="model" label="产品型号" rules={[{required:true,message:'请填写产品型号'}]}><Input placeholder="例如 HUAWEI MateBook GT 14" /></Form.Item>
+        <Form.Item name="model" label="产品型号" help={modelLoadError ? '知识库型号加载失败，请刷新页面重试' : undefined} rules={[{required:true,message:'请选择产品型号'}]}><Select showSearch optionFilterProp="label" placeholder="选择知识库产品型号" options={modelOptions} /></Form.Item>
         <Form.Item name="audience" label="目标受众" rules={[{required:true,message:'请填写目标受众'}]}><Input placeholder="为谁创作？" /></Form.Item>
         <Form.Item name="scenario" label="使用场景" rules={[{required:true,message:'请填写使用场景'}]}><Input.TextArea rows={2} placeholder="例如：出差途中修改提案、客户会议" /></Form.Item>
-        <Form.Item name="goal" label="内容目标" rules={[{required:true,message:'请填写内容目标'}]}><Input /></Form.Item>
+        <Form.Item name="goal" label="内容目标" rules={[{required:true,message:'请选择或填写内容目标'}]}>{imageOnly ? <Select placeholder="选择生图风格" options={[{ value: '商业宣传海报', label: '商业宣传海报' }, { value: '日常生活照', label: '日常生活照' }]} /> : <Input />}</Form.Item>
+        {imageOnly && <Form.Item name="image_count" label="生成数量"><Select options={[1, 2, 3].map(value => ({ value, label: `${value} 张` }))} /></Form.Item>}
         <Form.Item name="requirements" label="重点表达"><Select mode="tags" options={[{value:'突出便携'},{value:'突出屏幕体验'},{value:'突出跨端协作'}]} placeholder="添加重点要求" /></Form.Item>
         <Form.Item name="include_price" valuePropName="checked"><Checkbox>包含价格信息 <span className="muted">· 需来源支持</span></Checkbox></Form.Item>
         <StudioButton type="submit" className="generate-button" disabled={busy}><Sparkles size={16} />{busy ? '正在创作…' : '开始创作'}<ArrowUpRight size={16} /></StudioButton>
