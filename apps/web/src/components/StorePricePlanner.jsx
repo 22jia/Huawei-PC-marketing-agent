@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Alert, Button, Checkbox, Divider, Drawer, Form, Input, InputNumber, Select, Space, Typography } from 'antd';
+import { Alert, Button, Checkbox, Divider, Form, Input, InputNumber, Select, Space, Typography } from 'antd';
 import { DemoStorePricePlanner } from './DemoStorePricePlanner';
+import { InlinePriceFrame } from './InlinePriceFrame';
 import { OfferRuleLookup } from './OfferRuleLookup';
 import { compareStorePlans, localDate } from '../lib/storePricePlan.mjs';
 
@@ -17,7 +18,7 @@ function initialDraft(context, tier = context.tier) {
   };
 }
 
-export function StorePricePlanner({ context, onClose }) {
+export function StorePricePlanner({ context, onClose, inline = false }) {
   const [draft, setDraft] = useState(() => initialDraft(context));
   const [demo, setDemo] = useState(true);
   const result = compareStorePlans(draft);
@@ -28,9 +29,9 @@ export function StorePricePlanner({ context, onClose }) {
       combinations: current.combinations.map((item) => ({ ...item, confirmed: false })) }));
   }
   const field = (label, key, type = 'text') => <Form.Item label={label}><Input type={type} value={draft[key]} onChange={(event) => updateQuote(key, event.target.value)} /></Form.Item>;
-  if (demo) return <DemoStorePricePlanner context={context} onClose={onClose} onExit={() => setDemo(false)} />;
-  return <Drawer title="制定门店价格方案" open onClose={onClose} width={600} destroyOnHidden>
-    <Paragraph type="secondary">本次方案仅保留在当前侧栏；关闭后清空。由店员填写核实结果，不会自动查询门店系统。</Paragraph>
+  if (demo) return <DemoStorePricePlanner inline={inline} context={context} onClose={onClose} onExit={() => setDemo(false)} />;
+  return <InlinePriceFrame inline={inline} title="制定门店价格方案" open onClose={onClose} width={600} destroyOnHidden>
+    <Paragraph type="secondary">由店员填写核实结果，收起后清空本次试算，不会自动查询门店系统。</Paragraph>
     <Form layout="vertical">
       <Alert type="info" showIcon message="知识库报价与华为商城比价" description="以知识库报价为门店演示基准，查询华为商城价格与教育优惠，国补按 15%（每件最高 ¥1,500）规则比较。" action={<Button size="small" onClick={() => setDemo(true)}>读取知识库并比价</Button>} />
       <Text strong>{draft.model}</Text>
@@ -75,5 +76,5 @@ export function StorePricePlanner({ context, onClose }) {
         {result.excluded > 0 && <Paragraph type="secondary">{result.excluded} 个组合因资料未齐、未确认、已过期或金额无效而未计入。</Paragraph>}
       </>}
     </Form>
-  </Drawer>;
+  </InlinePriceFrame>;
 }

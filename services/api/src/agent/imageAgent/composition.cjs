@@ -59,7 +59,7 @@ function posterFacts(evidence = [], width = 768, height = 1024, optionsModel) {
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">${cells}${separators}</svg>`);
 }
 
-async function prepareSubject(asset, options = {}) {
+async function readOfficialReference(asset, options = {}) {
   assertActive(options.signal);
   if (typeof asset.source_path !== 'string' || !asset.source_path) throw new ImageProviderError('IMAGE_INVALID_SOURCE', '官方图缺少本地素材路径');
   let root;
@@ -72,6 +72,17 @@ async function prepareSubject(asset, options = {}) {
     const data = fs.readFileSync(file);
     const metadata = await sharp(data, { limitInputPixels: 25000000 }).metadata();
     if (!['png', 'jpeg', 'webp'].includes(metadata.format) || (metadata.pages || 1) !== 1) throw new ImageProviderError('IMAGE_INVALID_SOURCE', '官方图必须是静态 PNG、JPEG 或 WebP');
+    return { buffer: data, metadata, mime: metadata.format === 'jpeg' ? 'image/jpeg' : `image/${metadata.format}` };
+  } catch (error) {
+    if (error instanceof ImageProviderError) throw error;
+    throw new ImageProviderError('IMAGE_PROCESSING_FAILED', '官方图无法解码或处理');
+  }
+}
+
+async function prepareSubject(asset, options = {}) {
+  const { buffer: data, metadata, mime } = await readOfficialReference(asset, options);
+  try {
+    const sharp = imageLibrary();
     let subjectData = data;
     const sourcePixels = await sharp(data, { limitInputPixels: 25000000 }).rotate().ensureAlpha().raw().toBuffer();
     let sourceHasTransparency = false;
@@ -80,8 +91,7 @@ async function prepareSubject(asset, options = {}) {
       const apiKey = process.env.REMOVE_BG_API_KEY;
       if (!apiKey) throw new ImageProviderError('IMAGE_CUTOUT_NOT_CONFIGURED', '所选官方图没有透明背景。请在服务端配置 REMOVE_BG_API_KEY 后重试；未使用近似抠图，以免损伤产品边缘。');
       const form = new FormData();
-      const mime = metadata.format === 'jpeg' ? 'image/jpeg' : `image/${metadata.format}`;
-      form.append('image_file', new Blob([data], { type: mime }), path.basename(file));
+      form.append('image_file', new Blob([data], { type: mime }), `product.${metadata.format}`);
       form.append('size', 'auto');
       form.append('format', 'png');
       let response;
@@ -162,4 +172,4 @@ async function composeSubject(background, subject, options = {}) {
     throw new ImageProviderError('IMAGE_INVALID_OUTPUT', '生成背景无法解码或合成');
   }
 }
-module.exports = { prepareSubject, composeSubject, compositionLayout, posterFacts };
+module.exports = { readOfficialReference, prepareSubject, composeSubject, compositionLayout, posterFacts };

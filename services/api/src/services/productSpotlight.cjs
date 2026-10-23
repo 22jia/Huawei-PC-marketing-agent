@@ -60,6 +60,7 @@ function getSpotlightProducts() {
           suitable_tasks: extractAudience(salesNotes),
           checked_at: checkedAt,
           source_path: relative,
+          recommendation_source_path: salesNotes ? path.relative(ROOT, companion).replace(/\\/g, '/') : relative,
           source_url: content.match(/^-\s*产品页：[ \t]*(https?:\/\/\S+)/m)?.[1] || '',
           vmall_search_url: `https://www.vmall.com/portal/search/index.html?targetRoute=searchresult&searchWord=${encodeURIComponent(name)}`,
           detail: content,

@@ -43,11 +43,11 @@ function creativeAssets(evidence) {
   }
   return [...new Map(assets.map((a) => [a.id, a])).values()].slice(0, 24);
 }
-function resolveImagePlan(plan, candidates, limit, options = {}) {
+function resolveImagePlan(plan, candidates, limit) {
   const used = new Set();
   return plan.map((p) => {
     const asset = candidates.find((a) => a.id === p.asset_id);
-    if (!asset || (!options.allowRepeated && used.has(p.asset_id)) || !['cover', 'inline', 'closing'].includes(p.placement) || typeof p.caption !== 'string' || !p.caption.trim() || typeof p.purpose !== 'string') throw Object.assign(new Error('模型配图规划含无效素材或重复引用，请重试。'), { code: 'LLM_INVALID_IMAGE_PLAN' });
+    if (!asset || used.has(p.asset_id) || !['cover', 'inline', 'closing'].includes(p.placement) || typeof p.caption !== 'string' || !p.caption.trim() || typeof p.purpose !== 'string') throw Object.assign(new Error('模型配图规划含无效素材或重复引用，请重试。'), { code: 'LLM_INVALID_IMAGE_PLAN' });
     used.add(p.asset_id);
     if (!Number.isInteger(p.after_paragraph) || p.after_paragraph < 0 || (p.placement !== 'cover' && p.after_paragraph < 1)) throw Object.assign(new Error('配图缺少有效的正文段落插入位置'), { code: 'LLM_INVALID_IMAGE_PLAN' });
     return { ...asset, caption: p.caption, purpose: p.purpose, placement: p.placement, after_paragraph: p.after_paragraph };

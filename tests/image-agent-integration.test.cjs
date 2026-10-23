@@ -2,21 +2,30 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { integrateImages } = require('../services/api/src/agent/imageAgent/integration.cjs');
 const { generate } = require('../services/api/src/agent/taskAgent.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const sharp = require('../services/api/node_modules/sharp');
 const source = { id: 'official', model: '测试型号', source_path: 'P1-产品参数库/01-鸿蒙电脑/HUAWEI MateBook 14/images/hwpc_matebook-14-harmonyos_深空灰沉稳配色_05.png', source_url: 'https://consumer.huawei.com/cn/',
   url: '/api/v1/products/image?path=test.png', description: '官方产品图', placement: 'cover', after_paragraph: 0, caption: '官方产品图', purpose: '封面' };
-const input = { task: { model: '测试型号', image_count: 2 }, assets: [source], evidence: [], platform: {}, strategy: {} };
+const input = { task: { model: '测试型号', image_count: 1 }, assets: [source], evidence: [], platform: {}, strategy: {} };
 const output = () => ({ status: 'success', images: [{ ...source, id: 'generated', source_product_image: 'official', generated: true,
   url: '/api/v1/generated-assets/generated.png' }], warnings: [] });
 
-test('workbench replaces one reviewed placement and preserves remaining official images', async () => {
+test('article generates multiple distinct scene slots from one official subject', async () => {
   const second = { ...source, id: 'second', placement: 'inline', after_paragraph: 1 };
   let captured;
-  const result = await integrateImages(input, [source, second], { generateCreativeImages: async (value) => { captured = value; return output(); } });
-  assert.equal(captured.strategy.image_plan.length, 1);
+  const result = await integrateImages({ ...input, task: { ...input.task, image_count: 3, audience: '大学新生', output_type: 'article' } }, [source, second], { generateCreativeImages: async (value) => {
+    captured = value;
+    return { status: 'success', warnings: [], images: value.strategy.image_plan.map((plan, index) => ({ ...source, ...plan, id: `generated_${index}`, source_product_image: plan.asset_id, generated: true, url: `/api/v1/generated-assets/generated_${index}.png` })) };
+  } });
+  assert.equal(captured.strategy.image_plan.length, 3);
+  assert.equal(new Set(captured.strategy.image_plan.map(plan => plan.scene_direction)).size, 3);
   assert.deepEqual(captured.assets.map(asset => asset.id), [source.id]);
   assert.equal(result.images[0].generated, true);
   assert.equal(result.images[0].source_path, source.source_path);
-  assert.equal(result.images[1], second);
+  assert.equal(result.images.length, 3);
+  assert.ok(result.images.every(image => image.generated));
   assert.equal(result.stage.status, 'success');
 });
 
@@ -49,7 +58,7 @@ test('cancellation propagates instead of returning official-image success', asyn
   } }), { code: 'IMAGE_GENERATION_CANCELLED' });
 });
 
-test('public generation pipeline calls image agent only after copy review', async () => {
+test('public generation pipeline prepares images before copy and review', async () => {
   const order = [];
   const meta = { model: 'test', duration_ms: 1 };
   const result = await generate({ model: '测试型号', audience: '学生', scenario: '学习', goal: '咨询', platform: 'wechat_moments', image_count: 1 }, {
@@ -61,9 +70,9 @@ test('public generation pipeline calls image agent only after copy review', asyn
     reviewCopy: async () => { order.push('review'); return { value: { passed: true, issues: [], revision_instructions: [] }, meta }; },
     generateCreativeImages: async (value) => { order.push('image'); assert.equal(value.task.model, '测试型号'); return output(); },
   });
-  assert.deepEqual(order, ['review', 'image']);
+  assert.deepEqual(order, ['image', 'review']);
   assert.equal(result.images[0].generated, true);
-  assert.equal(result.llm.stages.at(-1).stage, 'imageGeneration');
+  assert.ok(result.llm.stages.some(stage => stage.stage === 'imageGeneration'));
 });
 
 test('frontend allows generated local files and rejects external or traversing URLs', async () => {
@@ -110,7 +119,9 @@ test('source selection supports any exact model with a transparent official asse
   const input = { task: { model, goal: '高级商业海报' }, assets: [asset], evidence: [], platform: {}, strategy: {} };
   assert.equal(selectSourceAsset(input, [asset], { purpose: '高端商业产品宣传海报' }).id, asset.id);
   assert.throws(() => selectSourceAsset(input, [{ ...asset, model: '其他型号' }], { purpose: '高端商业产品宣传海报' }), { code: 'IMAGE_NO_MATCHED_ASSET' });
-  assert.throws(() => selectSourceAsset(input, [{ ...asset, hasTransparency: false }], { purpose: '高端商业产品宣传海报' }), { code: 'IMAGE_NO_MATCHED_ASSET' });
+  const opaque = { ...asset, id: 'opaque', hasTransparency: false };
+  assert.equal(selectSourceAsset(input, [opaque], { purpose: '高端商业产品宣传海报' }).id, opaque.id);
+  assert.equal(selectSourceAsset(input, [opaque, asset], { purpose: '高端商业产品宣传海报' }).id, asset.id);
 });
 
 test('image-only generation skips copy and review and returns generated images', async () => {
@@ -140,6 +151,45 @@ test('hero selection rejects cropped detail PNGs even when larger than a full pr
   assert.throws(() => selectSourceAsset(input, [detail], { purpose: '商业海报' }), { code: 'IMAGE_NO_MATCHED_ASSET' });
 });
 
+test('opaque Pro S sources reach cutout and then generation, with a clear fallback when cutout is unavailable', async (t) => {
+  const { creativeAssets } = require('../services/api/src/services/creativeAssets.cjs');
+  const { generateCreativeImages } = require('../services/api/src/agent/imageAgent/engine.cjs');
+  const model = 'HUAWEI MateBook Pro S';
+  const assets = creativeAssets([{ title: `${model} - 产品事实`, source_path: 'P1-产品参数库/01-鸿蒙电脑/HUAWEI MateBook Pro S/产品事实.md' }]);
+  assert.ok(assets.length);
+  const placement = { ...assets[0], placement: 'cover', after_paragraph: 0, caption: '产品外观', purpose: '日常生活照片' };
+  const value = { ...input, task: { model, image_count: 1, platform: 'xiaohongshu', scenario: '出差办公' }, assets };
+  const oldKey = process.env.REMOVE_BG_API_KEY;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opaque-image-agent-'));
+  t.after(() => {
+    if (oldKey === undefined) delete process.env.REMOVE_BG_API_KEY; else process.env.REMOVE_BG_API_KEY = oldKey;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  delete process.env.REMOVE_BG_API_KEY;
+  let generated = 0;
+  const background = await sharp({ create: { width: 50, height: 50, channels: 3, background: '#cccccc' } }).png().toBuffer();
+  const provider = { id: 'test', generate: async () => { generated++; return [{ buffer: background }]; } };
+  const failed = await integrateImages(value, [placement], {
+    generateCreativeImages: (v, options) => generateCreativeImages(v, { ...options, root, provider }),
+  });
+  assert.equal(failed.stage.code, 'IMAGE_CUTOUT_NOT_CONFIGURED');
+  assert.match(failed.warnings[0], /尚未配置抠图服务/);
+  assert.equal(generated, 0);
+  process.env.REMOVE_BG_API_KEY = 'mock-cutout';
+  const cutout = await sharp(background).extend({ top: 1, bottom: 1, left: 1, right: 1, background: '#00000000' }).png().toBuffer();
+  const order = [];
+  const succeeded = await integrateImages(value, [placement], {
+    generateCreativeImages: (v, options) => generateCreativeImages(v, { ...options, root,
+      fetch: async url => { assert.equal(url, 'https://api.remove.bg/v1.0/removebg'); order.push('cutout'); return new Response(cutout); },
+      provider: { id: 'test', generate: async () => { order.push('generate'); return [{ buffer: background }]; } },
+    }),
+  });
+  assert.equal(succeeded.stage.status, 'success', JSON.stringify(succeeded.warnings));
+  assert.deepEqual(order, ['cutout', 'generate']);
+  assert.equal(succeeded.images[0].generated, true);
+  assert.equal(succeeded.images[0].model, model);
+});
+
 test('Ultra workbench uses full exact-model derived subject for poster and daily scenes', async () => {
   const { creativeAssets } = require('../services/api/src/services/creativeAssets.cjs');
   const { resolveProductImage } = require('../services/api/src/services/productSpotlight.cjs');
@@ -160,7 +210,7 @@ test('Ultra workbench uses full exact-model derived subject for poster and daily
   }
   for (const goal of ['高级商业海报', '日常生活照']) {
     const placement = { ...assets[0], placement: 'cover', after_paragraph: 0, caption: '产品外观', purpose: goal };
-    const result = await integrateImages({ ...input, task: { model, goal, scenario: '书桌学习' }, assets }, [placement], {
+    const result = await integrateImages({ ...input, task: { model, goal, scenario: '书桌学习', image_count: 1 }, assets }, [placement], {
       generateCreativeImages: async value => {
         const asset = value.assets[0];
         const plan = value.strategy.image_plan[0];
@@ -178,4 +228,42 @@ test('Ultra workbench uses full exact-model derived subject for poster and daily
     assert.equal(result.stage.status, 'success', JSON.stringify(result.warnings));
     assert.equal(result.images[0].source_product_image, hero.id);
   }
+});
+
+test('three image variants reuse one official subject without duplicate-source rejection', async (t) => {
+  const { creativeAssets } = require('../services/api/src/services/creativeAssets.cjs');
+  const { generateCreativeImages } = require('../services/api/src/agent/imageAgent/engine.cjs');
+  const model = 'HUAWEI MateBook 14（鸿蒙版）';
+  const assets = creativeAssets([{ title: `${model} - 产品事实`, source_path: 'P1-产品参数库/01-鸿蒙电脑/HUAWEI MateBook 14/产品事实.md' }]);
+  const official = assets.find(asset => asset.source_url);
+  assert.ok(official, 'an exact-model transparent official subject is required');
+  const placements = ['cover', 'inline', 'closing'].map((placement, index) => ({ ...official, placement, after_paragraph: index, caption: `变体${index + 1}`, purpose: `海报${index + 1}` }));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'image-agent-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const background = await sharp({ create: { width: 1200, height: 1600, channels: 3, background: '#d9dde5' } }).png().toBuffer();
+  let captured;
+  let active = 0;
+  let peak = 0;
+  const result = await integrateImages({
+    task: { model, goal: '高级商业海报', output_type: 'image', image_count: 3, platform: 'wechat_moments', scenario: '产品发布' },
+    assets, evidence: [], platform: { label: '朋友圈' }, strategy: {},
+  }, placements, {
+    generateCreativeImages: (value, options) => {
+      captured = value;
+      return generateCreativeImages(value, { ...options, root, provider: { id: 'test', generate: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        active--;
+        return [{ buffer: background }];
+      } } });
+    },
+  });
+  assert.equal(result.stage.status, 'success', JSON.stringify(result.warnings));
+  assert.equal(result.images.length, 3);
+  assert.equal(new Set(result.images.map(image => image.id)).size, 3);
+  assert.equal(captured.assets.length, 1);
+  assert.equal(captured.strategy.image_plan.length, 3);
+  assert.equal(peak, 3);
+  assert.deepEqual(result.images.map(image => image.placement), ['cover', 'inline', 'closing']);
 });

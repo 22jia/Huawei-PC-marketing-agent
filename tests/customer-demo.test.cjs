@@ -69,6 +69,18 @@ for (const scenario of scenarios) {
 }
 
 // Reproduce the exact failure: even a budget acknowledgement is seen as a price
+test('chat budget in natural language constrains scenario recommendations', async () => {
+  for (const budget of ['7000元', '7千', '0.7万']) {
+    const result = await run({ customer_description: `大学生写论文，预算${budget}，使用华为手机` });
+    assert.ok(result.solution.candidate_products.length > 0);
+    for (const product of result.solution.candidate_products) {
+      assert.equal(product.price_solution.budget, 7000);
+      assert.ok(product.recommended_configuration.price <= 7000);
+      assert.ok(product.reason);
+    }
+  }
+});
+
 test('scenario retrieval version ambiguity does not block a customer with no intended model', async () => {
   const result = await run({ customer_description: '大学生在图书馆写论文，想轻便和手机互传', budget: '7000' }, {
     retrieveEvidence: async () => ({ evidence: [], ambiguous_model: true, model_candidates: ['鸿蒙版', 'Windows版'] }),

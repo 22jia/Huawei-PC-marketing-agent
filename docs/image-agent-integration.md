@@ -4,6 +4,20 @@
 
 ## 当前接入状态
 
+### 参考图编辑更新（优先于下文背景合成说明）
+
+默认生产路径现为：检索产品资料 → 图文策划 → 选择同型号官方素材 → 上传原图到 `POST /v1/images/edits` → 模型处理原背景并生成成图 → 校验、保存与展示 → 文案与审核。使用现有 `CREDIT_MEDIA_API_KEY` 和 `IMAGE_MODEL`，不需要 remove.bg。已用 Pro S 官方 JPG 和当前 gpt-image-2 完成一次真实接口验证，约 29 秒返回图片；这只验证接口通路，不代表外观自动审核通过。
+
+`IMAGE_EDIT_URL` 可指定编辑接口；默认从 `IMAGE_BASE_URL` 的 `/generations` 推导 `/edits`。multipart 请求只传 `model/prompt/size/image`，其中 image 是后端读取的官方原图字节，不传磁盘路径或完整知识库。提示词由 `engine.cjs:buildEditPrompt` 生成；图片接口没有单独的 system 消息。结果标记 `ai_reference_edit`，不能声称产品主体像素原样保留；当前仍需人工核对型号外观和 Logo。
+
+文章仍默认编辑一张主视觉，其他插图保留官方原图。失败会记录错误码，页面提示回退原因，不静默伪报成功。`IMAGE_GENERATION_MODE=composition` 可显式切回旧的背景生成＋本地合成方式，该模式的不透明原图才需要 remove.bg。只实现 generate 的旧测试/自定义适配器继续走合成方式。
+
+### 当前新版 Studio 集成说明（2026-10-22，优先于下文原 PR 描述）
+
+当前使用对话式 Studio，保留 SSE 阶段进度、会话和日志。调用顺序为检索、策划、生图、文案、审核。index.cjs 为兼容入口，integration.cjs 负责选图和校验，engine.cjs 执行生图和合成。失败会记录错误码并回退官方图，不标记为生图成功。
+
+后端读取完整地址 `IMAGE_BASE_URL=https://api.openai-next.com/v1/images/generations`，而非 `IMAGE_API_BASE_URL`。密钥变量为 `CREDIT_MEDIA_API_KEY`，模型 `IMAGE_MODEL=gpt-image-2`，超时 `IMAGE_TIMEOUT_MS=180000`，上限 `IMAGE_MAX_IMAGES=3`。密钥仅存本地 `.env`，禁止提交。文章默认生成一张主视觉，其余保留官方图；三张是上限。
+
 本分支已接入 PC 场景营销工作台现有 `/api/v1/generate`。用户沿用原有表单和“开始创作”按钮，布局不变。主流程完成事实检索、图文策划、文案生成和审核后调用图片模块。默认只生成一张策划选中的主视觉（优先封面），其他位置保留官方图；`IMAGE_MAX_IMAGES=1..6` 可调整上限。未配置图片凭据或 `IMAGE_PROVIDER=none` 时沿用官方配图，不发付费请求。
 
 `integration.cjs` 校验成功状态、数量、型号、输入素材关联、官方来源、本地 URL 和策划位置；异常或非法输出回退本次已核验的官方图，记录 `llm.stages` 中 `imageGeneration` 的成功/失败状态。取消请求会传递到图片模块，不作为普通失败回退。当前 API 仍是一次性 JSON 响应，阶段信息在完成后显示，尚无实时进度流；文字阶段取消仍沿用原有行为。

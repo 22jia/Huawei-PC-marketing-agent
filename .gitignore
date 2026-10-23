@@ -18,3 +18,9 @@ __pycache__/
 
 # Local copies of competition materials and extracted knowledge-base content
 tmp_knowledgebase/
+
+# Agent execution records (local task content)
+data/run-logs/
+data/generation-jobs/
+data/sessions/
+services/api/data/tickets.json

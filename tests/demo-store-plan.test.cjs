@@ -50,3 +50,17 @@ test('non VMall education source cannot enter comparison', async () => {
   const result = buildDemoPlan({ ...profile, quote: 6599, educationPrice: 5000, educationSource: 'https://consumer.huawei.com/edu', educationConfirmed: true, subsidyExample: false });
   assert.equal(result.result.plans.some((plan) => plan.name.includes('教育')), false);
 });
+
+test('personal subsidy selection toggles a conditional estimate without changing verified cheapest price', async () => {
+  const { createDemoProfile, buildDemoPlan } = await import('../apps/web/src/lib/demoStorePlan.mjs');
+  const base = { ...createDemoProfile(), quote: 5999, onlinePrice: 5899, onlineSource: 'https://www.vmall.com/product/1', onlineConfirmed: true };
+  assert.deepEqual(buildDemoPlan(base, '2026-10-23').result.subsidyPreviews, []);
+  const selected = buildDemoPlan({ ...base, subsidyEligible: true }, '2026-10-23').result;
+  assert.equal(selected.subsidyPreviews[0].subsidy, 884.85);
+  assert.equal(selected.subsidyPreviews[0].price, 5014.15);
+  assert.equal(selected.best.price, 5899);
+  assert.equal(buildDemoPlan({ ...base, subsidyEligible: true, onlinePrice: 12000 }, '2026-10-23').result.subsidyPreviews[0].subsidy, 1500);
+  assert.deepEqual(buildDemoPlan({ ...base, subsidyEligible: true }, '2027-01-01').result.subsidyPreviews, []);
+  assert.deepEqual(buildDemoPlan({ ...base, subsidyEligible: true, onlineConfirmed: false }, '2026-10-23').result.subsidyPreviews, []);
+  assert.deepEqual(buildDemoPlan({ ...base, subsidyEligible: true, onlineSource: 'https://example.com' }, '2026-10-23').result.subsidyPreviews, []);
+});

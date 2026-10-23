@@ -5,7 +5,7 @@ export function creativeArticle(result) {
     const description = String(image.description || '产品配图').replace(/[\[\]\r\n]/g, '');
     const caption = String(image.caption || '').replace(/\r?\n/g, ' ');
     const sourceLabel = image.generated
-      ? 'AI生成合成图（背景由 AI 生成，产品主体为知识库原图）'
+      ? image.generation_mode === 'ai_reference_edit' ? 'AI参考图编辑（参考官方产品原图生成，非实拍）' : 'AI生成合成图（背景由 AI 生成，产品主体为知识库原图）'
       : '知识库原图（官方产品素材）';
     return `![${description}](${image.url})\n\n*${sourceLabel}${caption ? `｜${caption}` : ''}*\n`;
   };
@@ -31,7 +31,7 @@ export function imagePosition(image, result) {
 // Reviewable delivery report; copying the article remains free of internal notes.
 export function creativeReport(result) {
   if (result.result_type === 'image_generation') {
-    return ['## 图片生成结果', ...result.images.map(image => `![AI生成图片](${image.url})\n\n*AI生成合成图｜产品主体来自知识库原图*`), ...(result.warnings || [])].join('\n\n');
+    return ['## 图片生成结果', ...result.images.map(image => `![AI生成图片](${image.url})\n\n*${image.generation_mode === 'ai_reference_edit' ? 'AI参考图编辑｜参考官方产品原图生成，非实拍' : 'AI生成合成图｜产品主体来自知识库原图'}*`), ...(result.warnings || [])].join('\n\n');
   }
   const scene = result.scene_judgment || {};
   const problems = Array.isArray(scene.main_problems) ? scene.main_problems.join('；') : scene.main_problems;
@@ -44,11 +44,11 @@ export function creativeReport(result) {
   const pictures = (result.images || []).map((item, i) => [
     `- 图片 ${i + 1}：${plain(item.name || item.description)}`,
     `  位置：${imagePosition(item, result)}；图注：${plain(item.caption)}  `,
-    `  制作方式：${item.generated ? 'AI 背景＋官方产品图合成（非实拍）' : '官方原图'}；本地来源：${plain(item.source_path)}  `,
+    `  制作方式：${item.generated ? item.generation_mode === 'ai_reference_edit' ? 'AI 参考图编辑（非实拍，外观待核对）' : 'AI 背景＋官方产品图合成（非实拍）' : '官方原图'}；本地来源：${plain(item.source_path)}  `,
     `  [官方来源](${item.source_url})；核验：已按型号索引匹配，画面与使用权待人工核对。`,
   ].join('\n')).join('\n\n');
   const validation = result.validation || {};
-  const imageWarnings = (result.warnings || []).filter((w) => /图片生成未完成|装饰性拼贴|不透明官方图/.test(w));
+  const imageWarnings = (result.warnings || []).filter((w) => /图片生成未完成|图片生成子 Agent|装饰性拼贴|不透明官方图/.test(w));
   return [
     '## 一、场景判断',
     `人群：${plain(scene.audience)}  \n场景：${plain(scene.scenario)}  \n购买阶段：${plain(scene.buying_stage)}  \n主要问题：${plain(problems)}  \n目标：${plain(scene.content_goal)}  \n平台：${plain(scene.platform)}  \n切入点：${plain(scene.angle)}`,

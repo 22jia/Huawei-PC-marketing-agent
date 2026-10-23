@@ -1,4 +1,6 @@
 import { Button, Card, Space, Tag, Typography } from 'antd';
+import { MarkdownContent } from './MarkdownContent';
+import { recommendationMarkdown } from '../../../../shared/recommendationCopy.mjs';
 
 const { Paragraph, Text } = Typography;
 
@@ -18,13 +20,11 @@ export function ProductRecommendations({ products, alternatives, loading, onSele
           <Paragraph strong>{tier ? `¥${tier.price} · 官网参考` : '价格待核'}</Paragraph>
           {item.price_solution?.budget_status === 'within_budget' && <Tag color="green">参考价在预算内</Tag>}
           {item.price_solution?.budget_status === 'over_budget' && <Tag color="orange">超预算 ¥{item.price_solution.budget_gap}</Tag>}
-          <Paragraph className="recommendation-fit">{item.positioning || item.reason}</Paragraph>
-          <Paragraph type="secondary">适合：{item.suitable_tasks?.slice(0, 2).join('、') || '关键任务待核'}</Paragraph>
-          {tier?.offer_summary && tier.offer_summary !== '未记录可确认的直降或赠品' && <Paragraph type="secondary">线上活动参考：{tier.offer_summary}</Paragraph>}
+          <MarkdownContent className="recommendation-fit">{recommendationMarkdown(item)}</MarkdownContent>
           {item.comparison && <Paragraph>比意向型号最低参考价约省 ¥{item.comparison.saving}；配置：{item.comparison.configuration}。<Text type="secondary">{item.comparison.note}</Text></Paragraph>}
           <Space wrap>
-            <Button type="primary" disabled={loading} onClick={() => onSelect(item.model)}>选这款，继续比价</Button>
-            <Button onClick={() => onPrice(item.price_solution, tier)}>查门店优惠</Button>
+            <Button type="primary" onClick={() => onSelect(item.model, item.price_solution || { model: item.model }, tier)}>选这款，继续比价</Button>
+            <Button onClick={() => onPrice(item.price_solution || { model: item.model }, tier)}>产品比价与门店优惠</Button>
             {/^https:\/\//i.test(source || '') && <a href={source} target="_blank" rel="noreferrer">官网</a>}
           </Space>
         </Card>;

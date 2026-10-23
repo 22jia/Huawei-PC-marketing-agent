@@ -1,6 +1,7 @@
 const { buildPriceSolution } = require('./priceSolutionService.cjs');
 const { fetchText, fetchOfferRules } = require('./storeOfferRules.cjs');
 const subsidyRule = require('../../../../shared/pcSubsidy2026.json');
+const { queryVmallPublicPrice } = require('./vmallPublicPrice.cjs');
 
 // Page amounts are candidates, never a verified price for the selected SKU.
 function pagePriceCandidates(html) {
@@ -24,6 +25,19 @@ async function queryChannelPrices(input = {}, options = {}) {
   const isVmall = (value) => { try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && (!u.port || u.port === '443') && /(^|\.)vmall\.com$/.test(u.hostname); } catch { return false; } };
   if (!isVmall(tier.source_url)) return { ...report, online: { status: 'unavailable', checked_at, candidates: [], message: '当前价格卡缺少华为商城链接。' } };
   const source = new URL(tier.source_url);
+  if (!options.fetchText || options.queryVmallPublicPrice) {
+    try {
+      const publicReport = await (options.queryVmallPublicPrice || queryVmallPublicPrice)({ source_url: source.href, model: solution.model, configuration: tier.configuration });
+      require('./runTrace.cjs').event('channel_prices.public_lookup', publicReport, publicReport.online?.status === 'verified' ? 'success' : 'failed');
+      return { ...report, ...publicReport };
+    } catch (error) {
+      const message = error.message.split('\n')[0];
+      require('./runTrace.cjs').event('channel_prices.public_lookup', { source_url: source.href, configuration: tier.configuration, message }, 'failed');
+      console.warn('[channel-prices] public lookup failed', { model: solution.model, configuration: tier.configuration, source_url: source.href, message });
+      return { ...report, online: { status: 'unavailable', source_url: source.href, checked_at, candidates: [], message: '商城查询失败：' + message },
+        education: { status: 'unavailable', rules: [], sources: [], message: '此次公开查询未完成，请重试。' } };
+    }
+  }
   const results = await Promise.allSettled([
     (options.fetchText || fetchText)(source.href, 8000),
     (options.fetchOfferRules || fetchOfferRules)({ model: input.model || solution.model, configuration: tier.configuration, region: '全国', channel: 'education' }),
@@ -31,7 +45,7 @@ async function queryChannelPrices(input = {}, options = {}) {
   const page = results[0];
   const candidates = page.status === 'fulfilled' ? pagePriceCandidates(page.value) : [];
   report.online = { status: candidates.length ? 'needs_sku_confirmation' : 'unavailable', source_url: source.href, checked_at, candidates,
-    message: candidates.length ? '页面金额需店员核对是否属于所选配置、是否已含优惠。' : '华为商城动态页未提供可稳定读取的价格，请打开同配置页面人工核价。' };
+    message: candidates.length ? '页面金额未匹配到具体配置，不参与自动比较。' : '商城查询失败：' + (page.reason?.message || '未读取到公开价格') };
   report.education = results[1].status === 'fulfilled' ? { ...results[1].value, rules: (results[1].value.rules || []).filter((r) => r.name === '教育优惠' && isVmall(r.source)), sources: (results[1].value.sources || []).filter((s) => isVmall(s.source_url)) } : { status: 'unavailable', rules: [], sources: [] };
   return report;
 }

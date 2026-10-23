@@ -35,16 +35,19 @@ function selectSourceAsset(input, assets, plan = {}) {
   const overhead = closed || explicitOverhead;
   const preferOverhead = explicitOverhead || selection.style.group === 'daily';
   const desired = { state: closed ? 'closed' : 'open', view: overhead || preferOverhead ? 'overhead' : 'oblique' };
-  const candidates = assets.filter(asset => asset.model === model && asset.hasTransparency === true)
+  // Opaque official images proceed to prepareSubject's background removal.
+  // Transparency is a preference here; subject preparation enforces it before generation.
+  const candidates = assets.filter(asset => asset.model === model)
     .map(asset => ({ ...asset, composition_profile: inferProfile(asset) }))
     // A transparent crop of a keyboard or port is not a complete product hero.
     .filter(asset => !asset.composition_profile.detailOnly)
     .filter(asset => !color || asset.composition_profile.color === color)
     .filter(asset => closed ? asset.composition_profile.state === 'closed' : asset.composition_profile.state !== 'closed')
     .filter(asset => !explicitOverhead || asset.composition_profile.view === 'overhead')
-    .sort((a, b) => Number(b.composition_profile.view === desired.view) - Number(a.composition_profile.view === desired.view) ||
+    .sort((a, b) => Number(b.hasTransparency === true) - Number(a.hasTransparency === true) ||
+      Number(b.composition_profile.view === desired.view) - Number(a.composition_profile.view === desired.view) ||
       (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0) || a.id.localeCompare(b.id));
-  if (!candidates.length) throw new ImageProviderError('IMAGE_NO_MATCHED_ASSET', '没有匹配型号、配色及场景角度的已确认透明素材，已停止生成；请换场景或明确选择原图。');
+  if (!candidates.length) throw new ImageProviderError('IMAGE_NO_MATCHED_ASSET', '没有匹配型号、配色及场景角度的完整产品素材。');
   return candidates[0];
 }
 function sourceCameraDirection(asset) {

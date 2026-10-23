@@ -8,10 +8,12 @@ const FOLLOW_UP_DAYS = [1, 3, 7];
 
 function normalizeInput(input = {}) {
   const description = String(input.customer_description || input.user_input || '').trim();
+  const budgetMatch = [...description.matchAll(/预算\s*(?:是|为|在|大概|大约|约|不超过|以内|[:：])?\s*(\d+(?:\.\d+)?)\s*(万|千|[kK])?/g)].at(-1);
+  const inferredBudget = budgetMatch ? String(Number(budgetMatch[1]) * (budgetMatch[2] === '万' ? 10000 : /千|k/i.test(budgetMatch[2] || '') ? 1000 : 1)) : '';
   return {
     customer_description: description,
     model: String(input.model || '').trim(),
-    budget: String(input.budget || '').trim(),
+    budget: String(input.budget || inferredBudget).trim(),
     store_name: String(input.store_name || '').trim(),
     follow_up_days: input.needs_follow_up === false ? [] : Array.isArray(input.follow_up_days)
       ? [...new Set(input.follow_up_days.map(Number).filter((day) => FOLLOW_UP_DAYS.includes(day)))].sort((a, b) => a - b)
@@ -64,7 +66,7 @@ function inferCustomer(description) {
 
 function buildQuestions(task, insight) {
   const questions = [];
-  if (!task.budget && !/预算|价格|贵|便宜|优惠/.test(task.customer_description)) questions.push('这次购机大致预算是多少？');
+  if (!task.budget && !/预算|价格|贵|便宜|优惠|\d+(?:\.\d+)?\s*(?:万|千|元|块)/.test(task.customer_description)) questions.push('这次购机大致预算是多少？');
   if (insight.audience === '待确认') questions.push('这台电脑主要是谁使用，日常最常做什么？');
   if (!/配置|软件|剪辑|设计|游戏|办公|论文|学习/.test(task.customer_description)) questions.push('最常使用的软件或任务是什么？');
   if (!/手机|平板|设备|协同|生态/.test(task.customer_description)) questions.push('您现在是否在使用华为手机或平板，希望电脑和它们协同吗？');
@@ -165,31 +167,59 @@ async function assistCustomer(input, options = {}) {
     };
   }
 
-  const planned = await (options.planTask || planTask)(task);
+  const planned = await (options.planTask || planTask)(task, { signal: options.signal });
   const customerSegment = classifyCustomerSegment(task.customer_description);
   const insight = { ...planned.value, evidence_queries: planned.value.retrieval_queries };
+  const questions = buildQuestions(task, insight);
+  if (options.interactive && questions.length) {
+    return {
+      status: 'needs_clarification',
+      customer: { audience: insight.audience, needs: insight.needs, concerns: insight.concerns, buying_stage: insight.buying_stage, summary: insight.summary },
+      clarification: { questions: [questions[0]], required_before_specific_recommendation: true },
+      solution: null,
+      sales_script: null,
+      objection_responses: [],
+      follow_up_plan: [],
+    };
+  }
   // A specific model is the strongest retrieval anchor. Scenario terms influence
   // the explanation and can later drive a secondary, targeted retrieval pass.
   const query = task.model || insight.evidence_queries[0] || task.customer_description;
   let retrieved = { evidence: [], knowledge_base: '' };
   let retrievalError = '';
+  options.signal?.throwIfAborted();
+  options.onProgress?.({ stage: 'retrieval', status: 'started' });
   try {
     retrieved = await collectEvidence(task, planned.value, options);
     retrievalError = retrieved.retrieval_warning || '';
+    options.onProgress?.({ stage: 'retrieval', status: 'success' });
   } catch (error) {
+    options.signal?.throwIfAborted();
+    options.onProgress?.({ stage: 'retrieval', status: 'failed' });
     retrievalError = error.message || '知识检索暂不可用';
   }
+  options.signal?.throwIfAborted();
 
   // Scenario queries can match several versions without the customer choosing
   // any model. Only an explicit model selection requires version clarification.
   if (!task.model) retrieved = { ...retrieved, ambiguous_model: false, model_candidates: [] };
+  if (options.interactive && task.model && retrieved.ambiguous_model) {
+    return {
+      status: 'needs_clarification',
+      customer: { audience: insight.audience, needs: insight.needs, concerns: insight.concerns, buying_stage: insight.buying_stage, summary: insight.summary },
+      clarification: { questions: [`资料中有多个相近版本：${(retrieved.model_candidates || []).join('、')}。客户关注的是哪一个？`], required_before_specific_recommendation: true },
+      solution: { status: 'needs_model_clarification', candidate_models: retrieved.model_candidates || [] },
+      sales_script: null,
+      objection_responses: [],
+      follow_up_plan: [],
+    };
+  }
 
   const evidence = (retrieved.evidence || []).filter((item) => item.content && item.confidence !== 'unavailable');
   if (!retrievalError && !evidence.length) {
     const unavailable = (retrieved.evidence || []).find((item) => item.warning);
     if (unavailable) retrievalError = unavailable.warning;
   }
-  const questions = buildQuestions(task, insight);
   if (retrieved.ambiguous_model) questions.unshift('本地资料中有多个同系列版本；客户关注的是鸿蒙版，还是 Windows 酷睿 Ultra 版？');
   const recommendationStatus = retrieved.ambiguous_model ? 'needs_model_clarification'
     : evidence.length ? 'needs_staff_confirmation' : 'insufficient_evidence';
@@ -202,6 +232,8 @@ async function assistCustomer(input, options = {}) {
       model: product.name,
       positioning: product.positioning,
       reason: product.reason || product.positioning,
+      recommendation_points: product.recommendation_points,
+      recommendation_source_path: product.recommendation_source_path,
       suitable_tasks: product.matched_tasks || product.suitable_tasks?.slice(0, 3) || [],
       source_path: product.source_path,
       source_url: product.source_url,
@@ -227,7 +259,16 @@ async function assistCustomer(input, options = {}) {
     })
     : [];
 
-  const generated = await (options.generateCustomer || generateCustomer)({ task, analysis: planned.value, evidence, ambiguous_model: Boolean(retrieved.ambiguous_model), model_candidates: retrieved.model_candidates || [] });
+  options.onProgress?.({ stage: 'generateReply', status: 'started' });
+  let generated;
+  try {
+    generated = await (options.generateCustomer || generateCustomer)({ task, analysis: planned.value, evidence, ambiguous_model: Boolean(retrieved.ambiguous_model), model_candidates: retrieved.model_candidates || [] }, { signal: options.signal });
+    options.signal?.throwIfAborted();
+    options.onProgress?.({ stage: 'generateReply', status: 'success' });
+  } catch (error) {
+    options.onProgress?.({ stage: 'generateReply', status: 'failed' });
+    throw error;
+  }
   let output = generated.value;
   try {
     assertGrounded(output, evidence);

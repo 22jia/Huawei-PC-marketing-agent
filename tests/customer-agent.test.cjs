@@ -3,6 +3,22 @@ const assert = require('node:assert/strict');
 const { assistCustomer: runAssist, inferCustomer } = require('../services/api/src/agent/customerAgent.cjs');
 
 // Deterministic model doubles: production never falls back to these templates.
+test('customer generation publishes its stage and receives the cancellation signal', async () => {
+  const controller = new AbortController();
+  const progress = [];
+  await assert.rejects(() => assistCustomer({ customer_description: '大学生写论文', model: 'HUAWEI MateBook 14' }, {
+    signal: controller.signal,
+    onProgress: event => progress.push(`${event.stage}:${event.status}`),
+    retrieveEvidence: async () => ({ evidence: [] }),
+    generateCustomer: async (_, options) => {
+      assert.equal(options.signal, controller.signal);
+      controller.abort();
+      options.signal.throwIfAborted();
+    },
+  }), { name: 'AbortError' });
+  assert.deepEqual(progress, ['retrieval:started', 'retrieval:success', 'generateReply:started', 'generateReply:failed']);
+});
+
 function assistCustomer(input, options = {}) {
   return runAssist(input, {
     planTask: async (task) => { const insight = inferCustomer(task.customer_description); return { value: { ...insight, summary: '学生关注便携', retrieval_queries: insight.evidence_queries }, meta: { model: 'test-model' } }; },
@@ -70,6 +86,36 @@ test('customer assist asks for a description when input is empty', async () => {
   const result = await assistCustomer({});
   assert.equal(result.status, 'needs_clarification');
   assert.equal(result.code, 'MISSING_CUSTOMER_DESCRIPTION');
+});
+
+test('interactive customer assist asks one missing question before retrieval or drafting', async () => {
+  let retrieved = false;
+  let drafted = false;
+  const result = await runAssist({ customer_description: '大学生，常在图书馆写论文，担心电脑太重' }, {
+    interactive: true,
+    planTask: async () => ({ value: { ...inferCustomer('大学生，常在图书馆写论文，担心电脑太重'), summary: '学生在图书馆写论文', retrieval_queries: [] }, meta: { model: 'test-model' } }),
+    retrieveEvidence: async () => { retrieved = true; return { evidence: [] }; },
+    generateCustomer: async () => { drafted = true; throw new Error('draft should not run before clarification'); },
+  });
+
+  assert.equal(result.status, 'needs_clarification');
+  assert.equal(result.clarification.questions.length, 1);
+  assert.match(result.clarification.questions[0], /预算/);
+  assert.equal(retrieved, false);
+  assert.equal(drafted, false);
+});
+
+test('interactive customer assist stops for an ambiguous product version before drafting', async () => {
+  let drafted = false;
+  const result = await runAssist({ customer_description: '大学生写论文，预算 8000 元，已有华为手机', model: 'HUAWEI MateBook 14' }, {
+    interactive: true,
+    planTask: async () => ({ value: { ...inferCustomer('大学生使用 MateBook 14 写论文，预算 8000 元'), summary: '学生选购电脑', retrieval_queries: ['MateBook 14'] }, meta: { model: 'test-model' } }),
+    retrieveEvidence: async () => ({ evidence: [], ambiguous_model: true, model_candidates: ['MateBook 14（鸿蒙版）', 'MateBook 14 酷睿 Ultra'] }),
+    generateCustomer: async () => { drafted = true; throw new Error('draft should not run for ambiguous version'); },
+  });
+  assert.equal(result.status, 'needs_clarification');
+  assert.match(result.clarification.questions[0], /鸿蒙版/);
+  assert.equal(drafted, false);
 });
 
 test('customer assist asks the store staff to choose between local product variants', async () => {

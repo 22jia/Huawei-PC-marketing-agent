@@ -79,17 +79,32 @@ function createHttpProvider(config = {}) {
   if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password) throw new ImageProviderError('IMAGE_INVALID_CONFIG', '图片服务必须使用 HTTPS 地址');
   const downloadHosts = new Set((process.env.IMAGE_DOWNLOAD_HOSTS || 'api.openai-next.com').split(',').map((host) => host.trim()).filter(Boolean));
   const request = config.fetch || fetch;
-  return {
-    id: 'openai-next',
-    async generate(input, options = {}) {
+  let editEndpoint;
+  try { editEndpoint = new URL(config.editUrl || process.env.IMAGE_EDIT_URL || endpoint.href.replace(/\/generations\/?$/, '/edits')); }
+  catch { throw new ImageProviderError('IMAGE_INVALID_CONFIG', '图片编辑服务地址无效'); }
+  if (editEndpoint.protocol !== 'https:' || editEndpoint.username || editEndpoint.password) throw new ImageProviderError('IMAGE_INVALID_CONFIG', '图片编辑服务必须使用 HTTPS 地址');
+  async function requestImage(input, options = {}, editing = false) {
       assertActive(options.signal);
+      let body;
+      const headers = { authorization: `Bearer ${apiKey}` };
+      if (editing) {
+        const reference = input.reference;
+        if (!Buffer.isBuffer(reference?.buffer) || !reference.buffer.length || reference.buffer.length > 12 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(reference.mime)) throw new ImageProviderError('IMAGE_INVALID_SOURCE', '图片编辑缺少有效的产品参考图');
+        body = new FormData();
+        body.append('model', model);
+        body.append('prompt', input.prompt);
+        body.append('size', size);
+        // Upload bytes only; do not send local paths, evidence or credentials as fields.
+        body.append('image', new Blob([reference.buffer], { type: reference.mime }), reference.mime === 'image/jpeg' ? 'product.jpg' : reference.mime === 'image/webp' ? 'product.webp' : 'product.png');
+      } else {
+        headers['content-type'] = 'application/json';
+        body = JSON.stringify({ model, prompt: input.prompt, size });
+      }
       const bounded = timeoutSignal(options.signal, timeoutMs);
       try {
-        const response = await request(endpoint.href, {
+        const response = await request(editing ? editEndpoint.href : endpoint.href, {
           method: 'POST', redirect: 'error',
-          headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-          // Only documented fields; product images and local paths are never uploaded.
-          body: JSON.stringify({ model, prompt: input.prompt, size }),
+          headers, body,
           signal: bounded.signal,
         });
         if (!response.ok) throw httpFailure(response.status);
@@ -121,8 +136,8 @@ function createHttpProvider(config = {}) {
         if (error instanceof ImageProviderError) throw error;
         throw transportFailure(error);
       } finally { bounded.cleanup(); }
-    },
-  };
+  }
+  return { id: 'openai-next', generate: (input, options) => requestImage(input, options), edit: (input, options) => requestImage(input, options, true) };
 }
 
 function createProvider(options = {}) {

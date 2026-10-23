@@ -11,11 +11,12 @@ ENV NODE_ENV=production \
     PORT=3000 \
     LOCAL_KNOWLEDGE_BASE_PATH=/app/华为PC全板块深度知识库_v7
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nginx \
+    && apt-get install -y --no-install-recommends nginx chromium \
     && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default
 WORKDIR /app
 COPY services/api/ /app/services/api/
-RUN npm install --prefix /app/services/api --omit=dev
+RUN cd /app/services/api && npm ci --omit=dev
+COPY SKILL.md /app/SKILL.md
 COPY scripts/start-api.cjs /app/scripts/start-api.cjs
 COPY shared/ /app/shared/
 COPY skills/ /app/skills/

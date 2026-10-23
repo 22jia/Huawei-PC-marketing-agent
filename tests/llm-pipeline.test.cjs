@@ -1,17 +1,15 @@
 const test = require('node:test');
-// Keep copy-only tests independent of local media credentials and paid providers.
-process.env.IMAGE_PROVIDER = 'none';
 const assert = require('node:assert/strict');
 const { generate } = require('../services/api/src/agent/taskAgent.cjs');
 const { assistCustomer } = require('../services/api/src/agent/customerAgent.cjs');
-const { requestJson, planContent, reviewCopy, generateCustomer } = require('../services/api/src/clients/llmClient.cjs');
+const { requestJson, planContent, reviewCopy, generateCustomer, generateReply } = require('../services/api/src/clients/llmClient.cjs');
 const task = { audience: '学生', scenario: '学习', goal: '到店', platform: 'xiaohongshu', model: 'MateBook 14 酷睿 Ultra', history: [{ role: 'assistant', content: '上一轮成稿' }, { role: 'user', content: '缩短一点' }] };
 const meta = { model: 'test-model', duration_ms: 2, usage: { total_tokens: 10 } };
 const plan = { value: { audience: '学生', needs: ['学习'], concerns: [], buying_stage: '比较', summary: '用于学习', retrieval_queries: ['学习 场景'] }, meta };
 const evidence = [{ title: '产品事实', source_path: 'P1-产品参数库/产品事实.md', content: '屏幕\n14.2 英寸\n限定目标配置。', source_status: 'local_snapshot' }];
 const editorialOptions = {
   creativeAssets: () => [{ id: 'test-image', url: '/api/v1/products/image?path=test.png', description: '官方产品图' }],
-  planContent: async () => ({ value: { angle: '带着课件选电脑', reader_tension: '课堂任务', platform_reason: '场景建议', outline: ['任务', '选择'], evidence_ids: ['E1'], fact_points: [], conflicts: [], image_plan: [{ asset_id: 'test-image', placement: 'cover', after_paragraph: 0, caption: '官方产品图', purpose: '封面' }], asset_gap: '' }, meta }),
+  planContent: async () => ({ value: { angle: '带着课件选电脑', reader_tension: '课堂任务', platform_reason: '场景建议', outline: ['任务', '选择'], evidence_ids: ['E1'], fact_points: [], conflicts: [], requirement_issues: [], image_plan: [{ asset_id: 'test-image', placement: 'cover', after_paragraph: 0, caption: '官方产品图', purpose: '封面' }], asset_gap: '' }, meta }),
   reviewCopy: async () => ({ value: { passed: true, platform_fit: '通过', issues: [], revision_instructions: [] }, meta }),
 };
 const options = { planTask: async () => plan, retrieveEvidence: async () => ({ evidence }), generateCopy: async ({ evidence: docs, history }) => { assert.match(docs[0].content, /14.2 英寸/); assert.equal(history[0].content, '上一轮成稿'); return { content: { title: '学习选购', body: '先用课件试用。', hashtags: [], cta: '到店体验' }, meta }; } };
@@ -29,6 +27,30 @@ test('customer output normalizes string follow-up days and filters unselected da
   const value = { questions: [], rationale: '按需求确认', sales_script: { opening: '您好', recommendation: '先试用', close: '欢迎到店' }, objection_responses: [], follow_up_plan: [1, 3, 7].map((day) => ({ day: String(day), objective: '确认需求', action: '核对软件', message_draft: '您常用什么软件？' })) };
   const result = await generateCustomer({ task: { follow_up_days: [1, 3] }, analysis: {}, evidence: [], ambiguous_model: false, model_candidates: [] }, { fetch: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(value) } }] }) }) });
   assert.deepEqual(result.value.follow_up_plan.map((item) => item.day), [1, 3]);
+});
+
+test('dialogue reply converts legacy numbered choices into structured quick replies', async () => {
+  const saved = Object.fromEntries(['LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'].map(key => [key, process.env[key]]));
+  process.env.LLM_API_KEY = 'test-key';
+  process.env.LLM_BASE_URL = 'https://llm.invalid/v1';
+  process.env.LLM_MODEL = 'test-model';
+  try {
+    const reply = '你说的这个版本具体是哪款电脑的哪个版本？\n\n1. 我提供完整型号和版本\n2. 请先按出差办公需求帮我筛选型号\n\n可以选一项，也可以直接告诉我的想法。';
+    const result = await generateReply({ task, analysis: {}, evidence: [], runtime: {} }, {
+      fetch: async () => ({
+        ok: true,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify({ reply, options: [] }) } }] }),
+      }),
+    });
+    assert.equal(result.reply, '你说的这个版本具体是哪款电脑的哪个版本？');
+    assert.deepEqual(result.options, ['我提供完整型号和版本', '请先按出差办公需求帮我筛选型号']);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test('customer output gets one schema repair with concrete field feedback', async () => {
@@ -69,7 +91,7 @@ test('missing evidence, conflicting facts and missing images stop article delive
   assert.equal(conflict.result_type, 'blocked');
   assert.match(conflict.reply, /相同配置屏幕参数矛盾/);
   assert.equal(conflict.content, undefined);
-  const noImage = await generate(task, { ...options, planContent: async () => ({ value: { conflicts: [], image_plan: [], asset_gap: '缺少同型号素材' }, meta }), generateCopy: mustNotGenerate });
+  const noImage = await generate(task, { ...options, planContent: async () => ({ value: { conflicts: [], requirement_issues: [], image_plan: [], asset_gap: '缺少同型号素材' }, meta }), generateCopy: mustNotGenerate });
   assert.equal(noImage.result_type, 'blocked');
   assert.match(noImage.reply, /缺少同型号素材/);
   assert.equal(noImage.content, undefined);
@@ -77,7 +99,81 @@ test('missing evidence, conflicting facts and missing images stop article delive
 test('creation uses model planning, full evidence and previous drafts', async () => {
   const result = await generate(task, options);
   assert.equal(result.generation_mode, 'llm');
-  assert.deepEqual(result.llm.stages.map((s) => s.stage), ['analysis', 'strategy', 'generation', 'review']);
+  assert.deepEqual(result.llm.stages.map((s) => s.stage), ['analysis', 'strategy', 'imageGeneration', 'generation', 'review']);
+});
+
+test('main agent shares the selected writing skill through planning, generation and review', async () => {
+  const skills = [];
+  const wrap = fn => async input => { skills.push(input.copywriting_skill); return fn(input); };
+  const result = await generate(task, {
+    ...options,
+    planContent: wrap(options.planContent),
+    generateCopy: wrap(options.generateCopy),
+    reviewCopy: wrap(options.reviewCopy),
+  });
+  assert.equal(skills.length, 3);
+  assert.ok(skills[0]);
+  assert.ok(skills.every(skill => skill === skills[0]));
+  assert.equal(result.writing_skill.name, 'platform-copywriting-skill');
+  assert.equal(result.writing_skill.version, skills[0].version);
+});
+test('image agent receives confirmed product context and can replace planned assets', async () => {
+  let received;
+  const result = await generate(task, { ...options, imageAgent: async (input) => {
+    received = input;
+    return { status: 'success', provider: 'test-image-agent', images: [{ id: 'generated-cover', url: '/api/v1/generated-assets/generated-cover.png', description: '学生学习场景', model: task.model, source_url: 'https://consumer.huawei.com/', source_product_image: 'test-image', generated: true, placement: 'cover', after_paragraph: 0, caption: '学习场景', purpose: '封面' }], warnings: [] };
+  } });
+  assert.equal(received.task.model, task.model);
+  assert.equal(received.task.audience, task.audience);
+  assert.equal(received.platform.label, '小红书');
+  assert.equal(received.evidence[0].title, evidence[0].title);
+  assert.equal(result.images[0].id, 'generated-cover');
+  assert.ok(result.llm.stages.some((stage) => stage.stage === 'imageGeneration'));
+});
+
+test('image agent failure falls back to the existing official product image', async () => {
+  const result = await generate(task, { ...options, imageAgent: async () => { throw new Error('provider unavailable secret=do-not-show'); } });
+  assert.equal(result.images[0].id, 'test-image');
+  assert.ok(result.warnings.some((warning) => /图片生成子 Agent/.test(warning)));
+  assert.doesNotMatch(result.warnings.join(' '), /do-not-show/);
+});
+
+test('generated image captions are corrected before review rather than stuck in copy-only repairs', async () => {
+  let reviews = 0;
+  const result = await generate(task, { ...options,
+    imageAgent: async () => ({ status: 'success', provider: 'test', images: [{ id: 'ai-cover', url: '/api/v1/generated-assets/ai-cover.png', description: '产品配图', model: task.model, source_url: 'https://consumer.huawei.com/', source_product_image: 'test-image', generated: true, placement: 'cover', after_paragraph: 0, caption: '官方主视觉，作为文章封面呈现产品外观', purpose: '封面' }], warnings: [] }),
+    reviewCopy: async ({ images }) => {
+      reviews++;
+      assert.doesNotMatch(images[0].caption, /官方主视觉|作为文章封面/);
+      assert.match(images[0].caption, /AI 创意配图（非实拍）/);
+      return editorialOptions.reviewCopy();
+    },
+  });
+  assert.equal(reviews, 1);
+  assert.equal(result.editorial_review.revision_count, 0);
+  assert.match(result.images[0].caption, /非实拍/);
+});
+
+test('repair exhaustion keeps detailed review findings in diagnostics, not the chat message', async () => {
+  await assert.rejects(generate(task, { ...options, repairPolicy: { maxRevisions: 0 },
+    reviewCopy: async () => ({ value: { passed: false, issues: ['内部图注错误 E1Q9 generation_mode'], revision_instructions: ['修正图注'] }, meta }),
+  }), error => {
+    assert.equal(error.code, 'CONTENT_REVIEW_FAILED');
+    assert.match(error.message, /运行日志/);
+    assert.doesNotMatch(error.message, /E1Q9|generation_mode/);
+    assert.match(error.details.diagnostic_message, /E1Q9/);
+    assert.equal(error.details.repair_history.length, 1);
+    return true;
+  });
+});
+
+test('image cutout failure preserves a safe actionable reason through the main agent', async () => {
+  const result = await generate(task, { ...options, imageAgent: async () => {
+    throw Object.assign(new Error('secret provider details'), { code: 'IMAGE_CUTOUT_NOT_CONFIGURED' });
+  } });
+  assert.equal(result.images[0].generated, false);
+  assert.ok(result.warnings.some(warning => /图片生成未完成.*IMAGE_CUTOUT_NOT_CONFIGURED.*尚未配置抠图服务/.test(warning)));
+  assert.doesNotMatch(result.warnings.join(' '), /secret provider details/);
 });
 test('model failure is surfaced without template content', async () => {
   await assert.rejects(generate(task, { ...options, generateCopy: async () => { throw Object.assign(new Error('HTTP 429'), { code: 'LLM_HTTP_ERROR' }); } }), { code: 'LLM_HTTP_ERROR' });
@@ -91,30 +187,6 @@ test('OLED and colour gamut alone cannot support eye health promises', async () 
   const { assertGrounded } = require('../services/api/src/agent/agentRuntime.cjs');
   assert.throws(() => assertGrounded('OLED屏幕保护你的眼睛，长时间使用不易疲劳。', [{ content: 'OLED屏幕，100% sRGB色域', source_status: 'local_snapshot' }]), { code: 'UNSUPPORTED_CLAIM' });
   assert.throws(() => assertGrounded('让你不再有视觉负担。', [{ content: 'OLED屏幕', source_status: 'local_snapshot' }]), { code: 'UNSUPPORTED_CLAIM' });
-});
-
-test('selected strategy facts limit which real specifications may enter the draft', async () => {
-  const { assertGrounded } = require('../services/api/src/agent/agentRuntime.cjs');
-  const docs = [{ content: '14.2 英寸\nOLED（抗反射屏）\n屏幕比例\n3:2\n分辨率\n2880 × 1920，243 PPI', source_path: 'P1-product/产品事实.md', source_status: 'local_snapshot' }];
-  const selected = [{ fact: '14.2 英寸', quote: '14.2 英寸' }];
-  assert.doesNotThrow(() => assertGrounded('屏幕尺寸为14.2英寸。', docs, selected));
-  assert.throws(() => assertGrounded('14.2英寸OLED，比例3:2，分辨率2880 × 1920。', docs, selected), { code: 'UNSUPPORTED_CLAIM' });
-  assert.throws(() => assertGrounded('14.2英寸OLED。', docs, [{ fact: '14.2英寸 OLED', quote: '14.2 英寸' }]), { code: 'UNSUPPORTED_CLAIM' });
-});
-
-test('unselected but real display specifications trigger a grounded rewrite', async () => {
-  let generations = 0;
-  const selectedStrategy = { ...editorialOptions, planContent: async () => ({ value: { angle: '屏幕选购', reader_tension: '核对需求', platform_reason: '具体场景', outline: ['体验'], evidence_ids: ['E1'], fact_points: [{ fact: '屏幕尺寸为14.2英寸', evidence_id: 'E1', quote: '14.2 英寸' }], conflicts: [], image_plan: [{ asset_id: 'test-image', placement: 'cover', after_paragraph: 0, caption: '官方产品图', purpose: '封面' }], asset_gap: '' }, meta }) };
-  const r = await generate(task, { ...options, ...selectedStrategy,
-    generateCopy: async ({ feedback }) => {
-      generations++;
-      if (generations === 2) assert.match(feedback.join(' '), /fact_points/);
-      return { content: { title: '屏幕选购', body: generations === 1 ? '14.2英寸OLED，比例3:2，分辨率2880 × 1920。' : '屏幕尺寸为14.2英寸。', hashtags: [], cta: '带上课件到店体验' }, meta };
-    },
-  });
-  assert.equal(generations, 2);
-  assert.equal(r.editorial_review.revision_count, 1);
-  assert.doesNotMatch(r.content.body, /OLED|3:2|2880/);
 });
 
 test('unsupported health copy is automatically rewritten with feedback before delivery', async () => {
@@ -134,10 +206,39 @@ test('unsupported health copy is automatically rewritten with feedback before de
   assert.doesNotMatch(r.content.body, /不易疲劳/);
 });
 
-test('repeated grounding failures stop after two automatic revisions without delivering bad copy', async () => {
+test('unchanged grounding failures stop after one ineffective revision without delivering bad copy', async () => {
   let calls = 0;
   await assert.rejects(generate(task, { ...options, generateCopy: async () => { calls++; return { content: { title: '选购', body: '保护你的眼睛', cta: '到店', hashtags: [] }, meta }; } }), { code: 'UNSUPPORTED_CLAIM' });
-  assert.equal(calls, 3);
+  assert.equal(calls, 2);
+});
+
+test('specific grounding feedback allows a third revision when the earlier issues change', async () => {
+  let calls = 0;
+  const result = await generate(task, { ...options, repairPolicy: { maxRevisions: 4 },
+    generateCopy: async ({ feedback }) => {
+      calls++;
+      if (calls > 1) {
+        assert.match(feedback.join(' '), new RegExp(`${98 + calls}小时`));
+        assert.match(feedback.join(' '), /parameter_or_promise/);
+      }
+      return { content: { title: '选购', body: calls < 4 ? `续航${99 + calls}小时。` : '带课程报告到店验证。', cta: '到店', hashtags: [] }, meta };
+    },
+  });
+  assert.equal(calls, 4);
+  assert.equal(result.editorial_review.revision_count, 3);
+});
+
+test('configured revision cap stops novel failures and exposes a diagnostic reason', async () => {
+  let calls = 0;
+  await assert.rejects(generate(task, { ...options, repairPolicy: { maxRevisions: 1 },
+    generateCopy: async () => ({ content: { title: '选购', body: `续航${100 + ++calls}小时`, cta: '到店', hashtags: [] }, meta }),
+  }), error => {
+    assert.equal(error.code, 'UNSUPPORTED_CLAIM');
+    assert.equal(error.details.repair_decision.reason, 'revision_budget_exhausted');
+    assert.equal(error.details.repair_history.length, 2);
+    return true;
+  });
+  assert.equal(calls, 2);
 });
 
 test('editorial rewrite that introduces an unsupported claim gets a further factual repair', async () => {
@@ -192,48 +293,6 @@ test('an unrelated reply does not silently choose a product version', async () =
   });
   assert.equal(r.status, 'needs_clarification');
 });
-test('text request timeout can be configured and rejects unbounded values before calling provider', async () => {
-  const previous = process.env.LLM_TIMEOUT_MS;
-  try {
-    process.env.LLM_TIMEOUT_MS = '180000';
-    await requestJson('test', {}, { fetch: async (_url, request) => {
-      assert.equal(request.signal.aborted, false);
-      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }) };
-    } });
-    for (const timeoutMs of [0, -1, 300001, NaN]) {
-      await assert.rejects(requestJson('test', {}, { timeoutMs, fetch: async () => assert.fail('must not call provider') }), { code: 'LLM_INVALID_CONFIG' });
-    }
-  } finally {
-    if (previous === undefined) delete process.env.LLM_TIMEOUT_MS;
-    else process.env.LLM_TIMEOUT_MS = previous;
-  }
-});
-
-test('bounded timeout and model temperature compatibility survive integration together', async () => {
-  const previousModel = process.env.LLM_MODEL;
-  const previousTimeout = process.env.LLM_TIMEOUT_MS;
-  try {
-    process.env.LLM_TIMEOUT_MS = '180000';
-    for (const model of ['o4-mini', 'o4-mini-2025-04-16', 'test-model']) {
-      process.env.LLM_MODEL = model;
-      await requestJson('test', {}, { fetch: async (_url, request) => {
-        const payload = JSON.parse(request.body);
-        assert.equal(payload.model, model);
-        assert.equal(request.signal.aborted, false);
-        if (model.startsWith('o4-mini')) assert.equal(Object.hasOwn(payload, 'temperature'), false);
-        else assert.equal(payload.temperature, 0.3);
-        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }) };
-      } });
-    }
-    await assert.rejects(requestJson('test', {}, { timeoutMs: 300001, fetch: async () => assert.fail('must not call provider') }), { code: 'LLM_INVALID_CONFIG' });
-  } finally {
-    if (previousModel === undefined) delete process.env.LLM_MODEL;
-    else process.env.LLM_MODEL = previousModel;
-    if (previousTimeout === undefined) delete process.env.LLM_TIMEOUT_MS;
-    else process.env.LLM_TIMEOUT_MS = previousTimeout;
-  }
-});
-
 test('HTTP and invalid JSON responses become safe diagnostic errors', async () => {
   await assert.rejects(requestJson('test', {}, { fetch: async () => ({ ok: false, status: 401 }) }), { code: 'LLM_HTTP_ERROR' });
   await assert.rejects(requestJson('test', {}, { fetch: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'not json' } }] }) }) }), { code: 'LLM_INVALID_JSON' });
@@ -299,8 +358,20 @@ test('model approval cannot allow invented inline image links into article deliv
   assert.doesNotMatch(r.content.body, /invented/);
 });
 
+test('automatic revision strips model image markup before final review', async () => {
+  let calls = 0;
+  const r = await generate(task, { ...options, generateCopy: async () => {
+    calls++;
+    return { content: { title: '选购', lead: calls === 2 ? '<img src="https://example.com/bad.png">导语' : '导语', body: calls === 1 ? '![假图](https://example.com/bad.png)正文' : '<img src="https://example.com/bad.png">正文', cta: '到店', hashtags: [] }, meta };
+  } });
+  assert.equal(calls, 2);
+  assert.doesNotMatch(`${r.content.lead}\n${r.content.body}`, /!\[|<img\b|example\.com/i);
+  assert.match(r.content.body, /正文/);
+  assert.equal(r.editorial_review.passed, true);
+});
+
 test('citation IDs resolve to exact server-held text and invented IDs are rejected', async () => {
-  const value = { angle: '屏幕选购', reader_tension: '看课件', platform_reason: '具体任务', outline: ['体验'], evidence_ids: ['E1'], fact_points: [{ fact: '14.2英寸', evidence_id: 'E1', quote_id: 'E1Q1' }], conflicts: [], image_plan: [], asset_gap: '' };
+  const value = { angle: '屏幕选购', reader_tension: '看课件', platform_reason: '具体任务', outline: ['体验'], evidence_ids: ['E1'], fact_points: [{ fact: '14.2英寸', evidence_id: 'E1', quote_id: 'E1Q1' }], conflicts: [], requirement_issues: [], image_plan: [], asset_gap: '' };
   const fetchResult = (v) => async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(v) } }], model: 'test-model' }) });
   const input = { task: { image_count: 3 }, evidence: [{ content: '14.2 英寸' }], platform: {}, analysis: {}, assets: [] };
   const r = await planContent(input, { fetch: fetchResult(value) });

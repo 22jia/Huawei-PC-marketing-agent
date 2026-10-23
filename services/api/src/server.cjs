@@ -1,3 +1,4 @@
+const { store: traceStore, withRun } = require('./services/runTrace.cjs');
 const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -9,9 +10,11 @@ const localKnowledgeBrowser = require('./services/localKnowledgeBrowser.cjs');
 const ticketStore = require('./services/ticketStore.cjs');
 const productSpotlight = require('./services/productSpotlight.cjs');
 const platformStrategies = require('./agent/platformStrategies.cjs');
+const sessionStore = require('./services/sessionStore.cjs');
+const { resolveGeneratedImage, MIME_TYPES } = require('./agent/imageAgent/storage.cjs');
+const { titleFor } = require('./services/conversationState.cjs');
 const { fetchOfferRules } = require('./services/storeOfferRules.cjs');
 const { queryChannelPrices } = require('./services/channelPriceService.cjs');
-const { resolveGeneratedImage, MIME_TYPES } = require('./agent/imageAgent/storage.cjs');
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -22,6 +25,7 @@ function requestId() {
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(body));
+  return body;
 }
 
 function readJson(request) {
@@ -39,11 +43,106 @@ function readJson(request) {
   });
 }
 
+async function runGeneration(body, id, options = {}, background = false) {
+      if (body.session_id && !sessionStore.get(body.session_id)) throw Object.assign(new Error('会话不存在'), { code: 'SESSION_NOT_FOUND' });
+      const session = body.session_id ? sessionStore.get(body.session_id) : null;
+      if (background && session) {
+        const latest = (body.history || []).filter(m => m.role === 'user').at(-1);
+        body.history = [...session.messages.map(m => ({ role: m.role, content: m.content.map(p => p.text).join('\n') })), ...(latest ? [latest] : [])];
+        for (const key of ['model', 'audience', 'scenario', 'goal', 'platform', 'requirements', 'include_price', 'image_count', 'content_flow', 'scenario_candidates']) {
+          if (session.task?.[key] !== undefined) body[key] = session.task[key];
+        }
+        body.last_artifact = session.artifact;
+        body.conversation_mode = session.conversation_mode;
+      }
+      if (session?.task) {
+        for (const key of ['model', 'audience', 'scenario', 'goal', 'platform', 'requirements', 'include_price', 'image_count', 'content_flow', 'scenario_candidates']) {
+          if (body[key] === undefined && session.task[key] !== undefined) body[key] = session.task[key];
+        }
+      }
+      if (session && body.last_artifact === undefined) body.last_artifact = session.artifact;
+      if (session?.conversation_mode && body.conversation_mode === undefined) body.conversation_mode = session.conversation_mode;
+      if (session && (!Array.isArray(body.history) || body.history.length === 0)) body.history = session.messages.map(m => ({ role: m.role, content: m.content.map(p => p.text).join('\n') }));
+      const persist = (result) => {
+        if (!session) return;
+        const history = Array.isArray(body.history) ? body.history : [];
+        const latestUser = history.filter(m => m.role === 'user').at(-1);
+        const assistantText = result?.reply || (result?.content ? `${result.content.title || ''}\n\n${result.content.body || ''}` : result?.task?.questions?.map(q => q.question).join('\n') || result?.message || '');
+        const messages = latestUser ? [{ role: 'user', content: [{ type: 'text', text: latestUser.content }] }] : [];
+        if (assistantText) {
+          const customer = require('./services/customerPresentation.cjs').customerPresentation(result);
+          messages.push({ role: 'assistant', content: [{ type: 'text', text: assistantText }], ...(customer ? { metadata: { custom: { studio_customer: customer } } } : {}) });
+        }
+        const conversationState = require('./services/conversationState.cjs');
+        sessionStore.append(body.session_id, messages, {
+          task: result?.task || session.task,
+          artifact: result?.content || session.artifact,
+          result,
+          last_request_id: id,
+          conversation_mode: result?.conversation_mode || session.conversation_mode,
+          customer_task: result?.customer_task || session.customer_task,
+          awaiting_ticket_consent: Object.hasOwn(result || {}, 'awaiting_ticket_consent') ? result.awaiting_ticket_consent : session.awaiting_ticket_consent,
+          awaiting_ticket_name: Object.hasOwn(result || {}, 'awaiting_ticket_name') ? result.awaiting_ticket_name : session.awaiting_ticket_name,
+          title: conversationState.titleFor(session, result || {}, latestUser?.content),
+        });
+      };
+      const latestUserText = Array.isArray(body.history) ? body.history.filter(m => m?.role === 'user').at(-1)?.content || '' : '';
+      const ticketDecision = session && require('./services/conversationState.cjs').ticketDecision(session, latestUserText, ticketStore.create);
+      if (ticketDecision) {
+        const result = { ...ticketDecision, task: session.task, conversation_mode: session.conversation_mode };
+        persist(result);
+        return { ...result, request_id: id };
+      }
+      try {
+        options.signal?.throwIfAborted();
+        const result = await generate(body, options);
+        options.signal?.throwIfAborted();
+        persist(result);
+        return { ...result, request_id: id };
+      } catch (error) {
+        const result = { status: 'error', code: options.signal?.aborted ? 'RUN_CANCELLED' : error.code || 'INTERNAL_ERROR', message: options.signal?.aborted ? '本次任务已停止。' : error.message, request_id: id, log_url: `/api/v1/runs/${id}` };
+        persist(result);
+        return result;
+      }
+}
+const jobs = require('./services/generationJobs.cjs').createJobManager({ execute: (body, id, options) => withRun(id, { route: '/api/v1/generate', session_id: body.session_id }, () => runGeneration(body, id, options, true)) });
+function sessionWithJob(session) {
+  if (!session) return session;
+  const job = jobs.latest(session.id);
+  if (job?.result && job.result.status !== 'error') delete job.result;
+  return { ...session, generation_job: job };
+}
+
 async function route(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   const method = request.method || 'GET';
   const id = requestId();
+  const tracked = method !== 'GET';
+  const execute = async () => {
   try {
+    if (method === 'GET' && url.pathname === '/api/v1/runs') return sendJson(response, 200, { items: traceStore.list(Object.fromEntries(url.searchParams)) });
+    if (method === 'GET' && url.pathname === '/api/v1/sessions') return sendJson(response, 200, { items: sessionStore.list().map(sessionWithJob).map(session => session.conversation_mode === 'customer' || !session.task ? session : { ...session, title: titleFor(session, {}) }) });
+    const jobMatch = url.pathname.match(/^\/api\/v1\/generation-jobs\/(req_[a-zA-Z0-9_]+)(\/cancel)?$/);
+    if (jobMatch) {
+      const job = method === 'POST' && jobMatch[2] ? jobs.cancel(jobMatch[1]) : method === 'GET' && !jobMatch[2] ? jobs.get(jobMatch[1]) : null;
+      return sendJson(response, job ? 200 : 404, job || { message: '任务不存在' });
+    }
+    const sessionMatch = url.pathname.match(/^\/api\/v1\/sessions\/([a-zA-Z0-9_-]+)$/);
+    if (sessionMatch && method === 'GET') {
+      const session = sessionStore.get(sessionMatch[1]);
+      return sendJson(response, session ? 200 : 404, sessionWithJob(session) || { status: 'error', message: '会话不存在' });
+    }
+    if (sessionMatch && method === 'PATCH') {
+      const session = sessionStore.update(sessionMatch[1], await readJson(request));
+      return sendJson(response, session ? 200 : 404, session || { status: 'error', message: '会话不存在' });
+    }
+    if (sessionMatch && method === 'DELETE') return sendJson(response, sessionStore.remove(sessionMatch[1]) ? 200 : 404, { status: 'success' });
+    if (method === 'POST' && url.pathname === '/api/v1/sessions') return sendJson(response, 201, sessionStore.create(await readJson(request)));
+    const runMatch = url.pathname.match(/^\/api\/v1\/runs\/(req_[a-zA-Z0-9_]+)$/);
+    if (method === 'GET' && runMatch) {
+      const run = traceStore.read(runMatch[1]);
+      return sendJson(response, run ? 200 : 404, run || { message: '运行记录不存在' });
+    }
     if (method === 'GET' && url.pathname === '/health') {
       return sendJson(response, 200, { status: 'ok', service: 'huawei-pc-marketing-agent' });
     }
@@ -60,22 +159,22 @@ async function route(request, response) {
         note: '产品介绍和适用任务来自本地产品资料；当前主推状态请运营人员确认。',
       });
     }
+    const generatedAssetMatch = url.pathname.match(/^\/api\/v1\/generated-assets\/([^/]+)$/);
+    if (method === 'GET' && generatedAssetMatch) {
+      const generatedPath = resolveGeneratedImage(generatedAssetMatch[1]);
+      if (!generatedPath) return sendJson(response, 404, { status: 'error', code: 'GENERATED_ASSET_NOT_FOUND', message: '生成图片不存在', request_id: id });
+      const type = MIME_TYPES[path.extname(generatedPath).slice(1).toLowerCase()];
+      response.writeHead(200, { 'Content-Type': type, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=86400, immutable' });
+      const stream = fs.createReadStream(generatedPath);
+      stream.on('error', () => response.destroy());
+      return stream.pipe(response);
+    }
     if (method === 'GET' && url.pathname === '/api/v1/products/image') {
       const imagePath = productSpotlight.resolveProductImage(url.searchParams.get('path'));
       if (!imagePath) return sendJson(response, 404, { status: 'error', message: '产品图片不存在', request_id: id });
       const type = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[path.extname(imagePath).toLowerCase()];
       response.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=3600' });
       return fs.createReadStream(imagePath).pipe(response);
-    }
-    const generatedAssetMatch = url.pathname.match(/^\/api\/v1\/generated-assets\/([^/]+)$/);
-    if (method === 'GET' && generatedAssetMatch) {
-      const generatedPath = resolveGeneratedImage(generatedAssetMatch[1]);
-      if (!generatedPath) return sendJson(response, 404, { status: 'error', code: 'GENERATED_ASSET_NOT_FOUND', message: '生成图片不存在', request_id: id });
-      const type = MIME_TYPES[path.extname(generatedPath).slice(1).toLowerCase()] || 'application/octet-stream';
-      response.writeHead(200, { 'Content-Type': type, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=86400, immutable' });
-      const stream = fs.createReadStream(generatedPath);
-      stream.on('error', () => response.destroy());
-      return stream.pipe(response);
     }
     const ticketMatch = url.pathname.match(/^\/api\/v1\/tickets\/([^/]+)(?:\/follow-ups)?$/);
     const isTicketFollowUp = /^\/api\/v1\/tickets\/[^/]+\/follow-ups$/.test(url.pathname);
@@ -97,6 +196,7 @@ async function route(request, response) {
     }
     if (method !== 'POST') return sendJson(response, 405, { status: 'error', code: 'METHOD_NOT_ALLOWED', request_id: id });
     const body = await readJson(request);
+    require('./services/runTrace.cjs').event('request', { body });
     if (url.pathname === '/api/v1/store/channel-prices') {
       return sendJson(response, 200, { request_id: id, ...await queryChannelPrices(body) });
     }
@@ -109,14 +209,14 @@ async function route(request, response) {
     }
     if (url.pathname === '/api/v1/customer/assist') {
       const result = await assistCustomer(body);
-      return sendJson(response, result.status === 'needs_clarification' ? 400 : 200, { request_id: id, ...result });
+      return sendJson(response, result.status === 'needs_clarification' ? 400 : 200, { ...result, request_id: id });
     }
     if (url.pathname === '/api/v1/knowledge/search') {
       if (!body.query || !String(body.query).trim()) {
         return sendJson(response, 400, { status: 'error', code: 'MISSING_REQUIRED_FIELD', message: '缺少 query 字段', request_id: id });
       }
       const result = await retrieveEvidence(String(body.query), { limit: Math.min(Number(body.limit) || 5, 10) });
-      return sendJson(response, 200, { request_id: id, ...result });
+      return sendJson(response, 200, { ...result, request_id: id });
     }
     if (url.pathname === '/api/v1/knowledge/list') {
       return sendJson(response, 200, { request_id: id, ...localKnowledgeBrowser.list(body.folder_id || localKnowledgeBrowser.ROOT_ID) });
@@ -168,14 +268,14 @@ async function route(request, response) {
       });
     }
     if (url.pathname === '/api/v1/generate') {
-      const controller = new AbortController();
-      const disconnect = () => { if (!response.writableEnded) controller.abort(); };
-      response.on('close', disconnect);
-      try {
-        const result = await generate(body, { signal: controller.signal });
-        if (!controller.signal.aborted) return sendJson(response, 200, { request_id: id, ...result });
-        return;
-      } finally { response.removeListener('close', disconnect); }
+      if (body.background === true) {
+        if (!sessionStore.get(body.session_id)) return sendJson(response, 404, { message: '会话不存在' });
+        return sendJson(response, 202, jobs.submit(requestId(), body));
+      }
+      if (request.headers.accept?.includes('text/event-stream')) {
+        return require('./services/progressStream.cjs').streamGeneration(response, id, options => runGeneration(body, id, options));
+      }
+      return sendJson(response, 200, await runGeneration(body, id));
     }
     if (url.pathname === '/api/v1/export') {
       if (!body.content || !body.format) return sendJson(response, 400, { status: 'error', code: 'MISSING_REQUIRED_FIELD', message: '缺少 content 或 format 字段', request_id: id });
@@ -185,9 +285,14 @@ async function route(request, response) {
     }
     return sendJson(response, 404, { status: 'error', code: 'NOT_FOUND', request_id: id });
   } catch (error) {
-    return sendJson(response, error.code ? 502 : 500, { status: 'error', code: error.code || 'INTERNAL_ERROR', message: error.message, generation_mode: 'failed', llm: { status: 'failed', error_code: error.code || 'INTERNAL_ERROR' }, request_id: id });
+    require('./services/runTrace.cjs').event('request_error', { error: require('./services/runTrace.cjs').errorInfo(error) }, 'failed');
+    const statusCode = /^(UNSUPPORTED_|UNVERIFIED_|CONTENT_REVIEW_|PRICE_EVIDENCE_)/.test(error.code || '') ? 422 : error.code?.startsWith('LLM_') ? 502 : 500;
+    return sendJson(response, statusCode, { status: 'error', code: error.code || 'INTERNAL_ERROR', message: error.message, generation_mode: 'failed', llm: { status: 'failed', error_code: error.code || 'INTERNAL_ERROR' }, request_id: id, log_url: `/api/v1/runs/${id}` });
   }
+  };
+  return tracked ? withRun(id, { route: url.pathname, method }, execute) : execute();
 }
 
 const server = http.createServer(route);
-server.listen(PORT, () => console.log(`API server listening on http://localhost:${PORT}`));
+server.listen(PORT, '127.0.0.1', () => console.log(`API server listening on http://127.0.0.1:${PORT}`));
+module.exports = server;

@@ -1,12 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
-import { Sparkles, PanelLeftClose, BookOpen, MessagesSquare, PenLine, ArrowUpRight, Plus, ChevronDown, Check, Settings2, Layers, CircleHelp, ChevronRight, ArrowLeft } from 'lucide-react';
+import { RunLogs } from './components/RunLogs';
+import { createStudioAdapter } from './lib/studioAdapter.mjs';
+import { restoreChatMessages } from './lib/customerPresentation.mjs';
+import { sessionRequest, createStudioSession } from './lib/sessionApi.mjs';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Sparkles, PanelLeftClose, BookOpen, MessagesSquare, PenLine, ArrowUpRight, Plus, ChevronDown, Check, Settings2, Layers, ChevronRight, ArrowLeft, FolderOpen, ChartNoAxesCombined } from 'lucide-react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { Button as StudioButton } from './components/ui/button';
 import { CreativeThread } from './components/CreativeThread';
 import { MarkdownContent } from './components/MarkdownContent';
+import { KnowledgeNavigationContext } from './lib/knowledgeNavigation';
 import { creativeArticle, creativeReport } from './lib/creativeArticle';
 import { ArticleDeliveryTools } from './components/ArticleDeliveryTools';
 import { ModelRunStatus } from './components/ModelRunStatus';
+import { formatGenerationError } from './lib/generationError';
 import { StorePricePlanner } from './components/StorePricePlanner';
 import { ProductRecommendations } from './components/ProductRecommendations';
 import {
@@ -17,8 +23,8 @@ import {
 import {
   BulbOutlined, CheckCircleOutlined, CopyOutlined, CustomerServiceOutlined,
   FileSearchOutlined, FileTextOutlined, PlayCircleOutlined, ReloadOutlined,
-  SafetyCertificateOutlined, SendOutlined, FolderOpenOutlined, FolderOutlined, FileOutlined,
-  DashboardOutlined, PlusOutlined, EyeOutlined,
+  SafetyCertificateOutlined, SendOutlined, FolderOutlined, FileOutlined,
+  PlusOutlined, EyeOutlined,
 } from '@ant-design/icons';
 
 const { Header, Content } = Layout;
@@ -32,7 +38,6 @@ const marketingInitialValues = {
   model: 'HUAWEI MateBook 14',
   requirements: ['突出便携', '突出屏幕体验'],
   include_price: false,
-  image_count: 3,
 };
 
 const customerInitialValues = {
@@ -97,7 +102,7 @@ function LegacyMarketingWorkbench({ messageApi }) {
     <Col xs={24} lg={16}>
       <Card title={<Space><FileTextOutlined />生成结果</Space>} className="panel-card result-card" extra={result?.content && <Button icon={<CopyOutlined />} onClick={copyBody}>复制内容</Button>}>
         {!result && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="填写左侧任务后开始生成" className="empty-state" />}
-        {result?.status === 'needs_clarification' && <Alert type="warning" showIcon message={result.result_type === 'product_selection' ? '场景匹配的产品建议' : '还需要补充信息'} description={<Space direction="vertical"><Text>{result.reply || result.task?.questions?.map((item) => item.question).join('；')}</Text></Space>} />}
+        {result?.status === 'needs_clarification' && <Alert type="warning" showIcon message="还需要补充信息" description={<Space direction="vertical">{result.task?.questions?.map((item) => <Text key={item.field}>{item.question}</Text>)}</Space>} />}
         {result?.content && <>
           <div className="result-meta"><Tag color={result.validation?.status === 'pass' ? 'success' : 'warning'} icon={<CheckCircleOutlined />}>{result.validation?.status === 'pass' ? '核验通过' : '需要人工确认'}</Tag><Text type="secondary">{result.request_id}</Text></div>
           <Title level={3}>{result.content.title}</Title>
@@ -115,77 +120,114 @@ function LegacyMarketingWorkbench({ messageApi }) {
   </Row>;
 }
 
-function MarketingWorkbench({ messageApi }) {
-  const [form] = Form.useForm();
-  const imageOnly = Form.useWatch('output_type', form) === 'image';
-  const [modelOptions, setModelOptions] = useState([]);
-  const [modelLoadError, setModelLoadError] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch('/api/v1/products/spotlight', { signal: controller.signal })
-      .then(response => { if (!response.ok) throw new Error('产品目录加载失败'); return response.json(); })
-      .then(data => setModelOptions([...new Set(data.items.map(item => item.name))].map(name => ({ value: name, label: name }))))
-      .catch(error => { if (error.name !== 'AbortError') setModelLoadError(true); });
-    return () => controller.abort();
-  }, []);
-  const [result, setResult] = useState(null);
+function MarketingWorkbench({ messageApi, sessionId, sessionData, onSessionUpdated }) {
+  const taskRef = useRef(sessionData?.task || {});
+  const [result, setResult] = useState(sessionData?.result?.content ? sessionData.result : null);
   const [runResult, setRunResult] = useState(null);
-  const artifactRef = useRef(null);
+  const artifactRef = useRef(sessionData?.artifact || null);
+  const sessionUpdatedRef = useRef(onSessionUpdated);
+  sessionUpdatedRef.current = onSessionUpdated;
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
+  // A background job is authoritative while it is queued or running. The
+  // session result may still contain an older clarification and must not show
+  // its options again when the user switches back to this conversation.
+  const sessionJob = sessionData?.generation_job || null;
+  const sessionJobActive = ['queued', 'running'].includes(sessionJob?.status);
+  const [quickReplies, setQuickReplies] = useState(sessionJobActive ? [] : (sessionData?.result?.quick_replies || sessionData?.result?.task?.questions?.[0]?.options || []));
   const [evidenceOpen, setEvidenceOpen] = useState(false);
-  const adapter = {
-    async run({ messages, abortSignal }) {
+  // Keep the adapter identity stable for the lifetime of this workbench. The
+  // local assistant runtime treats a new adapter as a new run context and can
+  // abort an in-flight fetch when state updates (busy/result) cause a render.
+  const adapter = useMemo(() => createStudioAdapter({
+    sessionId: () => sessionId,
+    getTask: () => taskRef.current,
+    getArtifact: () => artifactRef.current,
+    formatReport: creativeReport,
+    formatError: formatGenerationError,
+    onStart() {
+      setQuickReplies([]);
       setBusy(true);
-      try {
-        const values = form.getFieldsValue(true);
-        const history = messages.filter((m) => ['user', 'assistant'].includes(m.role)).slice(-12).map((m) => ({ role: m.role, content: m.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n') }));
-        setRunResult(null);
-        const response = await fetch('/api/v1/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortSignal, body: JSON.stringify({ ...values, history, last_artifact: artifactRef.current }) });
-        const data = await response.json();
-        if (!response.ok || data.status === 'error') throw new Error(`${data.message || '生成失败，请重试'}${data.code ? `（${data.code}）` : ''}`);
-        if (data.task && !abortSignal?.aborted) {
-          const updates = {};
-          for (const key of ['model', 'audience', 'scenario', 'goal', 'platform', 'requirements', 'include_price']) {
-            if (data.task[key] !== undefined && JSON.stringify(form.getFieldValue(key)) === JSON.stringify(values[key])) updates[key] = data.task[key];
-          }
-          form.setFieldsValue(updates);
-        }
-        setRunResult(data);
-        if (data.result_type === 'image_generation' && data.images?.length) {
-          setResult(data);
-          return { content: [{ type: 'text', text: creativeReport(data) }] };
-        }
-        if (data.reply) return { content: [{ type: 'text', text: data.reply }] };
-        if (!data.content) return { content: [{ type: 'text', text: `${data.task?.questions?.map((q) => q.question).join('\n') || '请补充任务信息。'}\n直接在这里回复即可，我会继续处理。` }] };
-        artifactRef.current = data.content;
-        setResult(data);
-        return { content: [{ type: 'text', text: creativeReport(data) }] };
-      } catch (error) {
-        if (error.name === 'AbortError') throw error;
-        return { content: [{ type: 'text', text: error.errorFields ? '请先补充左侧必填的创作信息，然后重新发送。' : `本次创作未完成：${error.message}。请稍后重试。` }] };
-      } finally { setBusy(false); }
+      setRunResult(null);
+      setProgress({ label: '正在连接创作服务', startedAt: Date.now(), steps: [] });
     },
-  };
+    onProgress(current) {
+      setProgress(previous => {
+        const steps = [...(previous?.steps || [])];
+        if (current.stage !== 'accepted') {
+          const pending = steps.findLastIndex(step => step.stage === current.stage && step.status === 'started');
+          if (current.status !== 'started' && pending >= 0) steps[pending] = current;
+          else steps.push(current);
+        }
+        return { ...previous, ...current, label: `${current.label}${current.status === 'success' ? '完成' : current.status === 'failed' ? '未通过' : '中…'}`, steps };
+      });
+    },
+    onResult(data) {
+      sessionUpdatedRef.current?.();
+      setQuickReplies(data.status === 'needs_clarification' ? data.task?.questions?.[0]?.options || [] : data.quick_replies || []);
+      setProgress(previous => ({ ...previous, request_id: data.request_id, label: ['needs_confirmation', 'needs_clarification'].includes(data.status) ? '等待你的补充或决定' : '处理完成', finishedAt: Date.now() }));
+      if (data.task) taskRef.current = data.task;
+      setRunResult(data);
+      if (data.content) { artifactRef.current = data.content; setResult(data); }
+    },
+    onError(error, cancelled) {
+      setQuickReplies([]);
+      setProgress(previous => ({ ...previous, label: cancelled ? '已停止本次任务' : '本次创作未完成，请查看运行日志', finishedAt: Date.now() }));
+      if (!cancelled) setRunResult({ status: 'error', code: error.code, message: error.message, request_id: error.request_id });
+    },
+    onFinish() { setBusy(false); },
+  }), [sessionId]);
+  const [backgroundJob, setBackgroundJob] = useState(sessionJob);
+  useEffect(() => {
+    if (busy) return;
+    let disposed = false;
+    let timer;
+    async function poll() {
+      try {
+        const response = await fetch(`/api/v1/sessions/${sessionId}`);
+        if (!response.ok) throw new Error('会话状态暂时不可用');
+        const detail = await response.json();
+        if (disposed) return;
+        setBackgroundJob(detail.generation_job || null);
+        if (detail.last_request_id !== sessionData?.last_request_id) {
+          sessionUpdatedRef.current?.();
+          return;
+        }
+      } catch { /* Reconnect on the next poll without stopping the task. */ }
+      if (!disposed) timer = setTimeout(poll, 1500);
+    }
+    poll();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [sessionId, busy, sessionData?.last_request_id]);
+  const backgroundActive = !busy && ['queued', 'running'].includes(backgroundJob?.status);
   async function copy() {
     try { await navigator.clipboard.writeText(creativeArticle(result)); messageApi.success('图文 Markdown 已复制'); } catch { messageApi.error('复制失败，请手动选择文案复制'); }
   }
-  return <div className="studio-workbench"><CreativeThread adapter={adapter}>{(runtime) => <>
-    <aside className="brief-panel"><div className="panel-eyebrow"><Settings2 size={15} /> 创作设定 <span>BRIEF</span></div><h3>好内容，始于好场景。</h3><p className="brief-description">告诉我，为谁而写，在哪打动他。</p>
-      <Form form={form} layout="vertical" initialValues={marketingInitialValues} onFinish={() => runtime.thread.append({ role: 'user', content: [{ type: 'text', text: form.getFieldValue('output_type') === 'image' ? '根据当前创作设定，仅生成图片，不生成文案。' : '根据当前创作设定，写一篇适合所选平台的场景化营销文案。' }] })}>
-        <Form.Item name="output_type" label="创作类型" initialValue="article"><Select onChange={value => { if (value === 'image') form.setFieldValue('goal', '商业宣传海报'); }} options={[{ value: 'article', label: '图文创作' }, { value: 'image', label: '仅生成图片（跳过文案审核）' }]} /></Form.Item>
-        <Form.Item name="platform" label="发布平台"><Select showSearch optionFilterProp="label" placeholder="选择发布平台，也可以在对话中指定" options={[{ value: 'xiaohongshu', label: '小红书' }, { value: 'wechat', label: '微信公众号' }, { value: 'wechat_moments', label: '微信朋友圈' }, { value: 'douyin', label: '抖音' }, { value: 'weibo', label: '微博' }, { value: 'bilibili', label: '哔哩哔哩' }]} /></Form.Item>
-        <Form.Item name="model" label="产品型号" help={modelLoadError ? '知识库型号加载失败，请刷新页面重试' : undefined} rules={[{required:true,message:'请选择产品型号'}]}><Select showSearch optionFilterProp="label" placeholder="选择知识库产品型号" options={modelOptions} /></Form.Item>
-        <Form.Item name="audience" label="目标受众" rules={[{required:true,message:'请填写目标受众'}]}><Input placeholder="为谁创作？" /></Form.Item>
-        <Form.Item name="scenario" label="使用场景" rules={[{required:true,message:'请填写使用场景'}]}><Input.TextArea rows={2} placeholder="例如：出差途中修改提案、客户会议" /></Form.Item>
-        <Form.Item name="goal" label="内容目标" rules={[{required:true,message:'请选择或填写内容目标'}]}>{imageOnly ? <Select placeholder="选择生图风格" options={[{ value: '商业宣传海报', label: '商业宣传海报' }, { value: '日常生活照', label: '日常生活照' }]} /> : <Input />}</Form.Item>
-        {imageOnly && <Form.Item name="image_count" label="生成数量"><Select options={[1, 2, 3].map(value => ({ value, label: `${value} 张` }))} /></Form.Item>}
-        <Form.Item name="requirements" label="重点表达"><Select mode="tags" options={[{value:'突出便携'},{value:'突出屏幕体验'},{value:'突出跨端协作'}]} placeholder="添加重点要求" /></Form.Item>
-        <Form.Item name="include_price" valuePropName="checked"><Checkbox>包含价格信息 <span className="muted">· 需来源支持</span></Checkbox></Form.Item>
-        <StudioButton type="submit" className="generate-button" disabled={busy}><Sparkles size={16} />{busy ? '正在创作…' : '开始创作'}<ArrowUpRight size={16} /></StudioButton>
-        <button className="reset-brief" type="button" disabled={busy} onClick={() => form.resetFields()}>重置创作设定</button>
-      </Form><div className="brief-footer"><BookOpen size={15} /><span>基于华为 PC 产品知识库</span><span className="status-dot" /></div>
-    </aside>
-    <div className="conversation-toolbar"><div><span className="live-dot" /> 创作对话 <span className="toolbar-subtitle">/ 新的灵感</span><ModelRunStatus result={runResult} /></div><Space wrap><ArticleDeliveryTools result={result} />{result?.content && <StudioButton variant="ghost" onClick={copy}><CopyOutlined /> 复制</StudioButton>}<StudioButton variant="outline" onClick={() => setEvidenceOpen(true)}><BookOpen size={14} /> 来源与核验 {result?.facts?.length || 0}</StudioButton></Space></div>
+  const initialMessages = restoreChatMessages(sessionData);
+  if (sessionJobActive && sessionJob.user_text) {
+    const lastUser = initialMessages.findLast(message => message.role === 'user');
+    if (!lastUser || lastUser.content?.map(part => part.text || '').join('\n') !== sessionJob.user_text) {
+      initialMessages.push({
+        id: `job-${sessionJob.request_id}-user`,
+        role: 'user',
+        content: [{ type: 'text', text: sessionJob.user_text }],
+      });
+    }
+    initialMessages.push({
+      id: `job-${sessionJob.request_id}-progress`,
+      role: 'assistant',
+      content: [{ type: 'text', text: `**${sessionJob.progress?.label || '任务已排队，等待执行'}**\n\n后台任务正在继续，已等待 ${Math.floor((sessionJob.elapsed_ms || 0) / 1000)} 秒。` }],
+      metadata: { custom: { studio_progress: true } },
+    });
+  }
+  if (sessionData?.result?.content || sessionData?.result?.result_type === 'image_generation') {
+    const lastAssistant = initialMessages.findLast(message => message.role === 'assistant');
+    if (lastAssistant) lastAssistant.content = [{ type: 'text', text: creativeReport(sessionData.result) }];
+  }
+  return <div className="studio-workbench conversation-workbench"><CreativeThread adapter={adapter} initialMessages={initialMessages} quickReplies={quickReplies} onQuickReply={() => setQuickReplies([])}>{(runtime) => <>
+    <div className="conversation-toolbar"><div><span className="live-dot" /> 助手对话 <span className="toolbar-subtitle">/ 内容与客户支持</span></div><Space wrap><RunLogs requestId={runResult?.request_id || progress?.request_id} /><ArticleDeliveryTools result={result} />{result?.content && <StudioButton variant="ghost" onClick={copy}><CopyOutlined /> 复制</StudioButton>}<StudioButton variant="outline" onClick={() => setEvidenceOpen(true)}><BookOpen size={14} /> 来源与核验 {result?.facts?.length || 0}</StudioButton>{backgroundActive && <Button size="small" onClick={async () => { await fetch(`/api/v1/generation-jobs/${backgroundJob.request_id}/cancel`, { method: 'POST' }); }}>停止任务</Button>}</Space></div>
+    {!busy && backgroundJob?.result?.code === 'RUN_INTERRUPTED' && <Alert type="warning" showIcon message={backgroundJob.result.message} />}
+    {result?.warnings?.some(warning => /图片生成未完成|图片生成子 Agent/.test(warning)) && <Alert type="warning" showIcon message="本次 AI 生图未完成，当前使用官方原图" description={result.warnings.filter(warning => /图片生成未完成|图片生成子 Agent/.test(warning)).join('；')} />}
   </>}</CreativeThread><Drawer title="来源与核验" open={evidenceOpen} onClose={() => setEvidenceOpen(false)} width={480}><p>核对产品依据后，再发布你的内容。</p>{result ? <><Tag color={result.validation?.status === 'pass' ? 'success' : 'warning'}>{result.validation?.status === 'pass' ? '基础规则检查通过' : '需要人工核对'}</Tag><List dataSource={result.facts || []} locale={{emptyText:'当前没有可引用的产品来源'}} renderItem={(item) => <List.Item><div><Text strong>{item.title}</Text><p>{item.source_path}</p></div></List.Item>} />{result.warnings?.length > 0 && <Alert type="warning" showIcon message="发布前确认" description={result.warnings.join('；')} />}<p className="muted">{result.generation_mode === 'llm' ? '本次由模型生成' : '尚未生成，等待补充信息'}</p></> : <Empty description="生成文案后，来源会显示在这里" />}</Drawer></div>;
 }
 
@@ -249,7 +291,7 @@ function CustomerAssistWorkbench({ messageApi }) {
       description={result.solution?.status === 'needs_model_clarification' ? '请确认系统版本。' : undefined}
     />}
     {result.solution?.candidate_models?.length > 0 && <div className="question-block"><Text strong>请选择客户关注的版本</Text><List size="small" dataSource={result.solution.candidate_models} renderItem={(item) => <List.Item actions={[<Button key="select" type="primary" disabled={loading} onClick={() => selectModel(item)}>选择并检索</Button>]}><Space><FileSearchOutlined /><Text>{item}</Text></Space></List.Item>} /></div>}
-    {result.solution?.candidate_products?.length > 0 && <ProductRecommendations products={result.solution.candidate_products} segment={result.customer?.segment} alternatives={result.solution.recommendation_stage === 'budget_alternatives'} loading={loading} onSelect={selectModel} onPrice={openPricePlanner} />}
+    {result.solution?.candidate_products?.length > 0 && <ProductRecommendations products={result.solution.candidate_products} segment={result.customer?.segment} alternatives={result.solution.recommendation_stage === 'budget_alternatives'} loading={loading} onSelect={(model, solution, tier) => { form.setFieldValue('model', model); openPricePlanner(solution, tier); }} onPrice={openPricePlanner} />}
     {result.clarification?.questions?.length > 0 && <div className="question-block"><Text strong>下一步沟通</Text><List size="small" dataSource={result.clarification.questions.slice(0, 2)} renderItem={(question) => <List.Item><FileSearchOutlined /> {question}</List.Item>} /></div>}
     {result.objection_responses?.length > 0 && <div className="question-block"><Text strong>客户关切与回应</Text><List size="small" dataSource={result.objection_responses.slice(0, 2)} renderItem={(item) => <List.Item><div><Text strong>{item.objection}</Text><Paragraph className="list-paragraph">{item.response}</Paragraph></div></List.Item>} /></div>}
     {result.solution?.price_solution?.status === 'available' && <section className="price-solution"><div className="price-solution-heading"><div><Title level={4}>价格参考</Title><Text type="secondary">{result.solution.price_solution.model} · VMall 参考价 · 门店价待核</Text></div><Button onClick={() => openPricePlanner()}>查门店优惠</Button></div>{result.solution.price_solution.budget_status === 'over_budget' && <Alert type="warning" showIcon message={`意向型号最低参考价 ¥${result.solution.price_solution.minimum_price}，超预算 ¥${result.solution.price_solution.budget_gap}`} description={result.solution.price_solution.budget_fit ? `同型号预算内配置：${result.solution.price_solution.budget_fit.configuration}，参考价 ¥${result.solution.price_solution.budget_fit.price}` : (result.solution?.candidate_products?.length ? '暂无同型号预算内配置，可比较预算内替代。' : '暂无已知的预算内替代，可先核实本店报价与可用优惠。')} />}{result.solution.price_solution.budget_status !== 'over_budget' && <Row gutter={[12, 12]}>{result.solution.price_solution.tiers.map((tier) => { const offerSummary = typeof tier.offer_summary === 'string' && tier.offer_summary.trim() && tier.offer_summary !== '未记录可确认的直降或赠品' ? tier.offer_summary.trim() : ''; return <Col xs={24} sm={12} key={`${tier.configuration}-${tier.price}`}><Card size="small" className={tier.recommended ? 'price-tier recommended' : 'price-tier'} title={<Space>{tier.label}{tier.recommended && <Tag color="green">预算内最高档</Tag>}</Space>}><Statistic value={tier.price} prefix="¥" precision={0} /><Paragraph className="price-tier-config">{tier.configuration}</Paragraph><Paragraph className="price-tier-conditions">{offerSummary ? `线上优惠参考：${offerSummary}。` : '线上优惠待核实'}<Button type="link" size="small" onClick={() => openPricePlanner(result.solution.price_solution, tier)}>核实门店权益</Button></Paragraph></Card></Col>; })}</Row>}<Alert className="price-solution-note" type="info" showIcon message="官网参考价，门店成交价与库存待确认" description={<span><a href={result.solution.price_solution.tiers[0]?.source_url} target="_blank" rel="noreferrer">查看官网</a></span>} /></section>}
@@ -345,7 +387,7 @@ function DashboardWorkbench({ messageApi }) {
   return <div><div className="dashboard-actions"><Text type="secondary">工单数据实时来自本地工作区</Text><Button icon={<ReloadOutlined />} onClick={load}>刷新看板</Button></div><Row gutter={[16, 16]}><Col xs={12} lg={6}><Card><Statistic title="累计工单" value={data.total} /></Card></Col><Col xs={12} lg={6}><Card><Statistic title="待跟进" value={data.pending_follow_up} valueStyle={{ color: '#fa8c16' }} /></Card></Col><Col xs={12} lg={6}><Card><Statistic title="已成交" value={data.won} valueStyle={{ color: '#52c41a' }} /></Card></Col><Col xs={12} lg={6}><Card><Statistic title="成交率" value={data.conversion_rate} suffix="%" valueStyle={{ color: '#1677ff' }} /></Card></Col></Row><Row gutter={[16, 16]} style={{ marginTop: 16 }}><Col xs={24} lg={12}><Card title="成交漏斗"><Space direction="vertical" style={{ width: '100%' }}>{data.status_distribution.filter((x) => x.count > 0).map((x) => <div key={x.status}><div className="funnel-label"><span>{statusLabels[x.status]}</span><Text type="secondary">{x.count}</Text></div><Progress percent={data.total ? Math.round(x.count / data.total * 100) : 0} showInfo={false} strokeColor={statusColors[x.status] === 'success' ? '#52c41a' : undefined} /></div>)}</Space></Card></Col><Col xs={24} lg={12}><Card title="产品成交表现"><Table size="small" rowKey="model" pagination={false} dataSource={data.product_stats} columns={[{ title: '产品', dataIndex: 'model' }, { title: '工单数', dataIndex: 'total' }, { title: '成交', dataIndex: 'won' }, { title: '成交率', render: (_, r) => `${r.total ? Math.round(r.won / r.total * 100) : 0}%` }]} locale={{ emptyText: '暂无产品数据' }} /></Card></Col></Row></div>;
 }
 
-function KnowledgeBrowser({ messageApi }) {
+function KnowledgeBrowser({ messageApi, entryPath, onReturnToChat }) {
   const [items, setItems] = useState([]);
   const [path, setPath] = useState([]);
   const [detail, setDetail] = useState(null);
@@ -360,7 +402,16 @@ function KnowledgeBrowser({ messageApi }) {
     } catch (error) { messageApi.error(error.message || '知识库目录读取失败'); }
     finally { setLoading(false); }
   }
-  useEffect(() => { loadFolder(''); }, []);
+  useEffect(() => {
+    if (!entryPath) { loadFolder(''); return; }
+    let active = true;
+    setDetail(null); setDetailLoading(true);
+    postJson('/api/v1/knowledge/item', { media_id: `local:${entryPath}` })
+      .then(data => { if (active) setDetail(data.item); })
+      .catch(error => { if (active) messageApi.error(error.message || '引用来源读取失败'); })
+      .finally(() => { if (active) setDetailLoading(false); });
+    return () => { active = false; };
+  }, [entryPath]);
   async function openItem(item) {
     if (item.kind === 'folder') return loadFolder(item.id);
     setDetailLoading(true);
@@ -369,8 +420,9 @@ function KnowledgeBrowser({ messageApi }) {
     finally { setDetailLoading(false); }
   }
   return <section className="knowledge-workspace">
+    {entryPath && <Button icon={<ArrowLeft size={15}/>} onClick={onReturnToChat}>返回对话</Button>}
     <div className="knowledge-page-heading"><div className="panel-eyebrow"><BookOpen size={15}/> 产品知识库 <span>KNOWLEDGE BASE</span></div><h2>华为 PC 全板块深度知识库 v7</h2><p>浏览产品事实、使用场景与服务资料；涉及实时价格和库存时请以华为商城页面为准。</p></div>
-    {detail ? <div className="knowledge-reader"><Button icon={<ArrowLeft size={15}/>} onClick={() => setDetail(null)}>返回目录</Button><div className="knowledge-reader-title"><FileTextOutlined/><Title level={3}>{detail.title}</Title></div><div className="knowledge-reader-content"><MarkdownContent>{detail.content}</MarkdownContent></div></div> : <><Breadcrumb items={[{ title: '知识库' }, ...path.slice(1).map((item) => ({ title: item.name }))]} /><div className="knowledge-directory"><List loading={loading || detailLoading} dataSource={items} locale={{ emptyText: '当前目录为空' }} renderItem={(item) => <List.Item className="knowledge-item" onClick={() => openItem(item)}><List.Item.Meta avatar={item.kind === 'folder' ? <FolderOutlined className="folder-icon" /> : <FileOutlined className="file-icon" />} title={item.title} description={item.kind === 'folder' ? '打开分类' : '查看知识内容'} /><Tag color={item.kind === 'folder' ? 'blue' : 'default'}>{item.kind === 'folder' ? '分类' : '知识条目'}</Tag><ChevronRight size={16} className="knowledge-chevron"/></List.Item>} /></div></>}
+    {detail ? <div className="knowledge-reader"><Button icon={<ArrowLeft size={15}/>} onClick={() => loadFolder('')}>返回目录</Button><div className="knowledge-reader-title"><FileTextOutlined/><Title level={3}>{detail.title}</Title></div><div className="knowledge-reader-content"><MarkdownContent>{detail.content}</MarkdownContent></div></div> : <><Breadcrumb items={[{ title: '知识库' }, ...path.slice(1).map((item) => ({ title: item.name }))]} /><div className="knowledge-directory"><List loading={loading || detailLoading} dataSource={items} locale={{ emptyText: '当前目录为空' }} renderItem={(item) => <List.Item className="knowledge-item" onClick={() => openItem(item)}><List.Item.Meta avatar={item.kind === 'folder' ? <FolderOutlined className="folder-icon" /> : <FileOutlined className="file-icon" />} title={item.title} description={item.kind === 'folder' ? '打开分类' : '查看知识内容'} /><Tag color={item.kind === 'folder' ? 'blue' : 'default'}>{item.kind === 'folder' ? '分类' : '知识条目'}</Tag><ChevronRight size={16} className="knowledge-chevron"/></List.Item>} /></div></>}
   </section>;
 }
 
@@ -440,12 +492,36 @@ function ProductSpotlight({ messageApi }) {
   </section>;
 }
 
+function SessionJobIndicator({ job, seen }) {
+  if (!job) return null;
+  if (['running', 'queued'].includes(job.status)) return <span className="session-job-spinner" role="status" aria-label={job.status === 'queued' ? '等待生成' : '正在生成'} title={job.status === 'queued' ? '等待生成' : '正在生成'}/>;
+  if (seen || job.status === 'cancelled') return null;
+  if (['completed', 'succeeded', 'failed'].includes(job.status)) return <span className={`session-job-dot ${job.status === 'failed' ? 'failed' : ''}`} role="status" aria-label={job.status === 'failed' ? '生成失败，点击查看' : '有新回复'} title={job.status === 'failed' ? '生成失败，点击查看' : '有新回复'}/>;
+  return null;
+}
+
 function App() {
   const [messageApi, contextHolder] = message.useMessage();
   const [serviceStatus, setServiceStatus] = useState('连接中');
-  const [workspace, setWorkspace] = useState('marketing');
-  const [session, setSession] = useState(0);
+  const [workspace, setWorkspace] = useState('assistant');
+  const [knowledgeEntry, setKnowledgeEntry] = useState(null);
+  const [sessions, setSessions] = useState([]);
+  const [seenJobs, setSeenJobs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('studio-seen-jobs') || '{}') || {}; } catch { return {}; }
+  });
+  const [sessionId, setSessionId] = useState(null);
+  const [sessionData, setSessionData] = useState(null);
+  const [sessionError, setSessionError] = useState('');
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const sessionFetchVersion = useRef(0);
   const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    const job = sessions.find(item => item.id === sessionId)?.generation_job;
+    if (workspace !== 'assistant' || !job?.request_id || !['completed', 'succeeded', 'failed', 'cancelled'].includes(job.status)) return;
+    setSeenJobs(previous => previous[sessionId] === job.request_id ? previous : { ...previous, [sessionId]: job.request_id });
+  }, [sessions, sessionId, workspace]);
+  useEffect(() => { localStorage.setItem('studio-seen-jobs', JSON.stringify(seenJobs)); }, [seenJobs]);
+
 
   useEffect(() => {
     fetch('/health').then((response) => {
@@ -453,15 +529,77 @@ function App() {
     }).catch(() => setServiceStatus('服务不可用'));
   }, []);
 
-  return <Layout className={`app-shell studio-shell ${collapsed ? 'sidebar-collapsed' : ''} workspace-${workspace}`}>
+  async function loadSessions(preferredId) {
+    const version = ++sessionFetchVersion.current;
+    setSessionLoading(true);
+    try {
+      const data = await sessionRequest('/api/v1/sessions');
+      if (!Array.isArray(data.items)) throw new Error('会话列表格式异常，请重试。');
+      let items = data.items;
+      if (!items.length) items = [await createStudioSession()];
+      const wanted = preferredId || sessionId || localStorage.getItem('studio-session-id');
+      const selected = items.some(item => item.id === wanted) ? wanted : items[0].id;
+      const detail = await sessionRequest(`/api/v1/sessions/${selected}`);
+      if (version !== sessionFetchVersion.current) return;
+      if (!detail.id || !Array.isArray(detail.messages)) throw new Error('会话数据格式异常，请重试。');
+      setSessions(items); setSessionData(detail); setSessionId(selected); setSessionError('');
+      localStorage.setItem('studio-session-id', selected);
+    } catch (error) { setSessionError(error.message); }
+    finally { setSessionLoading(false); }
+  }
+  useEffect(() => { loadSessions(); }, []);
+  useEffect(() => {
+    let disposed = false;
+    const timer = setInterval(async () => {
+      try {
+        const response = await fetch('/api/v1/sessions');
+        const data = await response.json();
+        if (!disposed && Array.isArray(data.items)) setSessions(data.items);
+      } catch { /* Keep existing conversations during temporary disconnection. */ }
+    }, 2000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, []);
+
+  async function createSession() {
+    const version = ++sessionFetchVersion.current;
+    try {
+      const created = await createStudioSession();
+      if (version !== sessionFetchVersion.current) return;
+      setSessions(items => [created, ...items]); setSessionData(created); setSessionId(created.id); setSessionError(''); setWorkspace('assistant');
+      localStorage.setItem('studio-session-id', created.id);
+    } catch (error) { setSessionError(error.message); }
+  }
+  async function selectSession(id) {
+    const version = ++sessionFetchVersion.current;
+    try {
+      const detail = await sessionRequest(`/api/v1/sessions/${id}`);
+      if (version !== sessionFetchVersion.current) return;
+      if (!detail.id || !Array.isArray(detail.messages)) throw new Error('会话数据格式异常，请重试。');
+      setSessionData(detail); setSessionId(id); setSessionError(''); setWorkspace('assistant');
+      localStorage.setItem('studio-session-id', id);
+    } catch (error) { setSessionError(error.message); }
+  }
+  async function deleteSession(id) {
+    try {
+      await sessionRequest(`/api/v1/sessions/${id}`, { method: 'DELETE' });
+      const remaining = sessions.filter(item => item.id !== id); setSessions(remaining);
+      if (id === sessionId) { setSessionId(null); setSessionData(null); await loadSessions(remaining[0]?.id); }
+    } catch (error) { setSessionError(error.message); }
+  }
+
+  return <KnowledgeNavigationContext.Provider value={path => { setKnowledgeEntry(path); setWorkspace('knowledge'); }}><Layout className={`app-shell studio-shell ${collapsed ? 'sidebar-collapsed' : ''} workspace-${workspace}`}>
     {contextHolder}
-    <aside className="studio-sidebar"><a className="studio-brand" href="/" aria-label="PC Studio 首页"><div className="studio-logo"><Layers size={21} /></div><div>PC Studio<span>华为 PC · 增长工作台</span></div></a><StudioButton variant="outline" className="new-session" onClick={() => { setSession((n) => n+1); setWorkspace('marketing'); }}><Plus size={17} /> 新建创作<span>＋</span></StudioButton><div className="nav-caption">工作空间</div><nav><button className={workspace === 'marketing' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('marketing')}><PenLine size={17} /> 内容创作<span>01</span></button><button className={workspace === 'customer' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('customer')}><MessagesSquare size={17} /> 客户成交助手<span>02</span></button><button className={workspace === 'tickets' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('tickets')}><FolderOpenOutlined /> 客户工单<span>03</span></button><button className={workspace === 'dashboard' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('dashboard')}><DashboardOutlined /> 经营看板<span>04</span></button><button className={workspace === 'spotlight' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('spotlight')}><Sparkles size={16} /> 新品速递<span>05</span></button><button className={workspace === 'knowledge' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('knowledge')}><BookOpen size={17} /> 产品知识库<span>06</span></button></nav><div className="sidebar-note"><span className="note-symbol">✳</span><h4>灵感有据，表达有度。</h4><p>从产品事实出发，<br />让每一次沟通更有价值。</p></div><div className="sidebar-bottom"><button className="nav-item" onClick={() => messageApi.info('先填写创作设定，再点击开始创作；生成后可在对话框中提出修改要求。')}><CircleHelp size={17} /> 使用帮助</button><DropdownMenu.Root><DropdownMenu.Trigger className="profile-trigger"><div className="profile-avatar">S</div><div>Studio 工作空间<span>内容运营与门店团队</span></div><ChevronDown size={14}/></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="profile-menu" sideOffset={8}><DropdownMenu.Label>当前工作空间</DropdownMenu.Label><DropdownMenu.Item onSelect={() => messageApi.info('当前使用本地工作空间')}><Check size={14}/> 本地团队空间</DropdownMenu.Item><DropdownMenu.Separator/><DropdownMenu.Item onSelect={() => setWorkspace('knowledge')}><BookOpen size={14}/> 查看产品知识库</DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root></div></aside>
-    <div className="studio-main"><header className="studio-topbar"><div><StudioButton variant="ghost" size="icon" aria-label="切换侧栏" onClick={() => setCollapsed(!collapsed)}><PanelLeftClose size={18}/></StudioButton><span className="breadcrumb-root">工作空间</span><span className="breadcrumb-slash">/</span><span>{{ marketing: '内容创作', customer: '客户成交助手', tickets: '客户工单', dashboard: '经营看板', spotlight: '新品速递', knowledge: '产品知识库' }[workspace]}</span></div><div className="topbar-right"><span className={`service-indicator ${serviceStatus === '服务已连接' ? 'connected' : ''}`}><i/>{serviceStatus}</span><span className="workspace-badge">PC STUDIO</span></div></header>
-    <Content className={`page-content ${workspace === 'knowledge' ? 'knowledge-page-content' : ''}`}>{workspace === 'knowledge' ? <KnowledgeBrowser key="knowledge" messageApi={messageApi}/> : <><div className="studio-heading"><div><div className="overline">{workspace === 'marketing' ? 'CONTENT STUDIO' : workspace === 'customer' ? 'CUSTOMER ASSISTANT' : workspace === 'tickets' ? 'CUSTOMER TICKETS' : 'SALES DASHBOARD'}</div><h1>{workspace === 'marketing' ? '让好产品，有好故事。' : workspace === 'customer' ? '让每次沟通，更进一步。' : workspace === 'tickets' ? '把跟进变成可追踪的工单。' : '用数据看见成交进展。'}</h1><p>{workspace === 'marketing' ? '从一个真实场景出发，把产品价值写进生活。' : workspace === 'customer' ? '梳理客户需求，准备有依据的讲解与跟进。' : workspace === 'tickets' ? '记录客户、安排跟进、沉淀成交结果。' : '查看工单状态、跟进漏斗和产品成交表现。'}</p></div><button className="knowledge-pill" onClick={() => setWorkspace('knowledge')}><span className="knowledge-icon"><BookOpen size={17}/></span><div>产品知识库<span>浏览产品资料与场景依据</span></div><ArrowUpRight size={16}/></button></div>
-      {workspace === 'marketing' ? null : workspace === 'customer' ? <CustomerAssistWorkbench messageApi={messageApi}/> : workspace === 'tickets' ? <TicketWorkbench messageApi={messageApi}/> : workspace === 'spotlight' ? <ProductSpotlight messageApi={messageApi}/> : <DashboardWorkbench messageApi={messageApi}/>}</>}
-      <div hidden={workspace !== 'marketing'}><MarketingWorkbench key={session} messageApi={messageApi}/></div>
+    <aside className="studio-sidebar"><a className="studio-brand" href="/" aria-label="PC Studio 首页"><div className="studio-logo"><Layers size={21} /></div><div>PC Studio<span>华为 PC · 增长工作台</span></div></a><StudioButton variant="outline" className="new-session" onClick={createSession}><Plus size={17} /> 新建对话<span>＋</span></StudioButton><div className="nav-caption">历史对话</div><div className="session-list">{sessions.slice(0, 8).map(item => <div className={`session-item ${item.id === sessionId ? 'active' : ''}`} key={item.id}><button onClick={() => selectSession(item.id)}><span className="session-title-text">{item.title || '新对话'}</span><SessionJobIndicator job={item.generation_job} seen={seenJobs[item.id] === item.generation_job?.request_id}/></button><button className="session-delete" onClick={() => deleteSession(item.id)} aria-label="删除会话">×</button></div>)}</div><div className="nav-caption">工作空间</div><nav><button className={workspace === 'tickets' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('tickets')}><FolderOpen size={16} /> 客户工单</button><button className={workspace === 'dashboard' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('dashboard')}><ChartNoAxesCombined size={16} /> 经营看板</button><button className={workspace === 'spotlight' ? 'nav-item active' : 'nav-item'} onClick={() => setWorkspace('spotlight')}><Sparkles size={16} /> 新品速递</button><button className={workspace === 'knowledge' ? 'nav-item active' : 'nav-item'} onClick={() => { setKnowledgeEntry(null); setWorkspace('knowledge'); }}><BookOpen size={17} /> 产品知识库</button></nav><div className="sidebar-note"><span className="note-symbol">✳</span><h4>灵感有据，表达有度。</h4><p>从产品事实出发，<br />让每一次沟通更有价值。</p></div><div className="sidebar-bottom"><DropdownMenu.Root><DropdownMenu.Trigger className="profile-trigger"><div className="profile-avatar">S</div><div>Studio 工作空间<span>内容运营与门店团队</span></div><ChevronDown size={14}/></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="profile-menu" sideOffset={8}><DropdownMenu.Label>当前工作空间</DropdownMenu.Label><DropdownMenu.Item onSelect={() => messageApi.info('当前使用本地工作空间')}><Check size={14}/> 本地团队空间</DropdownMenu.Item><DropdownMenu.Separator/><DropdownMenu.Item onSelect={() => { setKnowledgeEntry(null); setWorkspace('knowledge'); }}><BookOpen size={14}/> 查看产品知识库</DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root></div></aside>
+    <div className="studio-main"><header className="studio-topbar"><div><StudioButton variant="ghost" size="icon" aria-label="切换侧栏" onClick={() => setCollapsed(!collapsed)}><PanelLeftClose size={18}/></StudioButton><span className="breadcrumb-root">工作空间</span><span className="breadcrumb-slash">/</span><span>{{ assistant: '智能助手', tickets: '客户工单', dashboard: '经营看板', spotlight: '新品速递', knowledge: '产品知识库' }[workspace]}</span></div><div className="topbar-right"><span className={`service-indicator ${serviceStatus === '服务已连接' ? 'connected' : ''}`}><i/>{serviceStatus}</span><span className="workspace-badge">PC STUDIO</span></div></header>
+    <Content className={`page-content ${workspace === 'knowledge' ? 'knowledge-page-content' : ''}`}>{workspace === 'knowledge' ? <KnowledgeBrowser key={knowledgeEntry || "knowledge"} messageApi={messageApi} entryPath={knowledgeEntry} onReturnToChat={() => setWorkspace("assistant")}/> : <><div className="studio-heading"><div><div className="overline">{workspace === 'assistant' ? 'STUDIO ASSISTANT' : workspace === 'tickets' ? 'CUSTOMER TICKETS' : 'SALES DASHBOARD'}</div><h1>{workspace === 'assistant' ? '说说你现在要处理的事。' : workspace === 'tickets' ? '把跟进变成可追踪的工单。' : '用数据看见成交进展。'}</h1><p>{workspace === 'assistant' ? '整理客户需求、准备成交方案，或策划一篇平台内容。' : workspace === 'tickets' ? '记录客户、安排跟进、沉淀成交结果。' : '查看工单状态、跟进漏斗和产品成交表现。'}</p></div>{workspace !== 'assistant' && <button className="knowledge-pill" onClick={() => { setKnowledgeEntry(null); setWorkspace('knowledge'); }}><span className="knowledge-icon"><BookOpen size={17}/></span><div>产品知识库<span>浏览产品资料与场景依据</span></div><ArrowUpRight size={16}/></button>}</div>
+      {workspace === 'assistant' ? null : workspace === 'tickets' ? <TicketWorkbench messageApi={messageApi}/> : workspace === 'spotlight' ? <ProductSpotlight messageApi={messageApi}/> : <DashboardWorkbench messageApi={messageApi}/>}</>}
+      <div hidden={workspace !== 'assistant'}>
+        {sessionError && <Alert type="error" showIcon message="对话加载失败" description={sessionError} action={<Button onClick={() => loadSessions()} loading={sessionLoading}>重新连接</Button>} />}
+        {!sessionId && sessionLoading && <div className="session-loading" role="status">正在加载对话…</div>}
+        {sessionId && sessionData?.id === sessionId && <MarketingWorkbench key={`${sessionId}-${sessionData.last_request_id || 'new'}`} sessionId={sessionId} sessionData={sessionData} onSessionUpdated={() => loadSessions(sessionId)} messageApi={messageApi}/>}
+      </div>
       <footer className="workspace-footer"><span>PC Studio · 每一份灵感，都值得认真表达。</span><span>AI 辅助创作，发布前请人工审核</span></footer></Content></div>
-  </Layout>;
+  </Layout></KnowledgeNavigationContext.Provider>;
 }
 
 export default App;

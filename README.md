@@ -7,6 +7,7 @@ An evidence-backed marketing-content agent for Huawei PC operations and store ma
 - [作品说明书](docs/作品说明书.md): positioning, differentiated capabilities, technical design, demo story, and delivery plan.
 - [Frontend interaction specification](docs/frontend-interaction-spec.md): Ant Design workbench and API integration rules.
 - [API contract](接口约束.md): source of truth for public endpoints and request/response fields.
+- [Image generation sub-agent integration](docs/image-agent-integration.md): backend contract, provider boundary, asset safety, fallback, and PR scope.
 
 ## Repository map
 
