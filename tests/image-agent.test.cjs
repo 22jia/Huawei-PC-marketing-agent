@@ -5,12 +5,15 @@ const { generateCreativeImages, validateImageAgentResult } = require('../service
 const asset = { id: 'product-1', url: '/api/v1/products/image?path=matebook.png', description: '官方产品图', model: 'MateBook 14', source_url: 'https://consumer.huawei.com/example' };
 const strategy = { image_plan: [{ asset_id: asset.id, placement: 'cover', after_paragraph: 0, caption: '产品外观', purpose: '封面' }] };
 
-test('default image agent preserves the current official asset workflow', async () => {
-  const result = await generateCreativeImages({ task: { model: 'MateBook 14' }, assets: [asset], strategy });
-  assert.equal(result.status, 'success');
-  assert.equal(result.provider, 'catalog');
-  assert.equal(result.images[0].url, asset.url);
-  assert.equal(result.images[0].generated, false);
+test('image agent surfaces disabled configuration instead of reporting official assets as generated success', async () => {
+  const previous = process.env.IMAGE_PROVIDER;
+  process.env.IMAGE_PROVIDER = 'none';
+  try {
+    await assert.rejects(generateCreativeImages({ task: { model: 'MateBook 14' }, assets: [asset], strategy }), { code: 'IMAGE_PROVIDER_NOT_CONFIGURED' });
+  } finally {
+    if (previous === undefined) delete process.env.IMAGE_PROVIDER;
+    else process.env.IMAGE_PROVIDER = previous;
+  }
 });
 
 test('image agent rejects outputs that do not reference a supplied product image', () => {

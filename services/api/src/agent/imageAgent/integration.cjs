@@ -52,7 +52,9 @@ async function integrateImages(input, officialImages, options = {}) {
   assertActive(options.signal);
   const enabled = Boolean(options.generateCreativeImages) || (process.env.IMAGE_PROVIDER !== 'none' &&
     Boolean(process.env.CREDIT_MEDIA_API_KEY || process.env.IMAGE_API_KEY));
-  if (!enabled) return { images: officialImages, warnings: [], stage: null };
+  if (!enabled) return { images: officialImages,
+    warnings: [imageFailureWarning({ code: 'IMAGE_PROVIDER_NOT_CONFIGURED' })],
+    stage: { stage: 'imageGeneration', status: 'failed', code: 'IMAGE_PROVIDER_NOT_CONFIGURED', duration_ms: 0 } };
   const started = Date.now();
   const configuredLimit = Number(process.env.IMAGE_MAX_IMAGES || 3);
   const limit = Number.isInteger(configuredLimit) && configuredLimit >= 1 && configuredLimit <= 6 ? configuredLimit : 3;
@@ -96,7 +98,9 @@ async function integrateImages(input, officialImages, options = {}) {
       }
       generatedIds.add(image.id);
     }
-    return { images: [...result.images.map((image, index) => ({ ...selected[index], ...image })), ...officialImages.filter(image => !originalSlots.includes(image.id))].slice(0, input.task.image_count ?? count), warnings: result.warnings,
+    const images = [...result.images.map((image, index) => ({ ...selected[index], ...image })), ...officialImages.filter(image => !originalSlots.includes(image.id))].slice(0, input.task.image_count ?? count);
+    const originalCount = images.filter(image => !image.generated).length;
+    return { images, warnings: [...result.warnings, ...(originalCount ? [`本次生成 ${result.images.length} 张 AI 配图；受后端生图数量上限 ${limit} 张限制，另有 ${originalCount} 张配图使用知识库原图。`] : [])],
       stage: { stage: 'imageGeneration', status: 'success', duration_ms: Date.now() - started } };
   } catch (error) {
     assertActive(options.signal);

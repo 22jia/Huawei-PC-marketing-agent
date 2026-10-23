@@ -12,6 +12,20 @@ const input = { task: { model: '测试型号', image_count: 1 }, assets: [source
 const output = () => ({ status: 'success', images: [{ ...source, id: 'generated', source_product_image: 'official', generated: true,
   url: '/api/v1/generated-assets/generated.png' }], warnings: [] });
 
+test('disabled provider reports configuration failure instead of catalog success', async () => {
+  const previous = process.env.IMAGE_PROVIDER;
+  process.env.IMAGE_PROVIDER = 'none';
+  try {
+    const result = await integrateImages(input, [source]);
+    assert.equal(result.stage.status, 'failed');
+    assert.equal(result.stage.code, 'IMAGE_PROVIDER_NOT_CONFIGURED');
+    assert.match(result.warnings[0], /没有调用生图模型/);
+  } finally {
+    if (previous === undefined) delete process.env.IMAGE_PROVIDER;
+    else process.env.IMAGE_PROVIDER = previous;
+  }
+});
+
 test('article generates multiple distinct scene slots from one official subject', async () => {
   const second = { ...source, id: 'second', placement: 'inline', after_paragraph: 1 };
   let captured;
