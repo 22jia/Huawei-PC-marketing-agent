@@ -2,6 +2,8 @@
 
 # Huawei PC marketing agent
 
+[English](README.en.md) · **中文**
+
 ### 面向华为门店员工的 AI 营销工作台
 
 **从一句想法，到有产品依据的图文，再到顾客跟进。**
