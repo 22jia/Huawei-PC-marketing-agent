@@ -1,6 +1,6 @@
 <div align="center">
 
-# PC Studio
+# Huawei PC marketing agent
 
 ### 面向华为门店员工的 AI 营销工作台
 
