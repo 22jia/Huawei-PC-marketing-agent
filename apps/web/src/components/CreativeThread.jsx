@@ -3,6 +3,7 @@ import { CustomerConversationResult } from './CustomerConversationResult';
 import { ArrowUp, Sparkles, Square, UserRound } from 'lucide-react';
 import { Button } from './ui/button';
 import { MarkdownContent } from './MarkdownContent';
+import { platformChoiceValue } from '../lib/platformChoice.mjs';
 
 function ArticleText({ text }) {
   return <MarkdownContent allowImages>{text}</MarkdownContent>;
@@ -22,7 +23,7 @@ export function CreativeThread({ adapter, children, initialMessages = [], quickR
 
   function chooseReply(option) {
     runtime.thread.composer.setText('');
-    runtime.thread.append({ role: 'user', content: [{ type: 'text', text: option }], startRun: true });
+    runtime.thread.append({ role: 'user', content: [{ type: 'text', text: platformChoiceValue(option) }], startRun: true });
     onQuickReply?.(option);
   }
 

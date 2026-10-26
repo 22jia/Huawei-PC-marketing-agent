@@ -15,6 +15,7 @@ const { resolveGeneratedImage, MIME_TYPES } = require('./agent/imageAgent/storag
 const { titleFor } = require('./services/conversationState.cjs');
 const { fetchOfferRules } = require('./services/storeOfferRules.cjs');
 const { queryChannelPrices } = require('./services/channelPriceService.cjs');
+const trends = require('./services/platformTrends.cjs').createTrendService({ log: require('./services/runTrace.cjs').event });
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -49,14 +50,14 @@ async function runGeneration(body, id, options = {}, background = false) {
       if (background && session) {
         const latest = (body.history || []).filter(m => m.role === 'user').at(-1);
         body.history = [...session.messages.map(m => ({ role: m.role, content: m.content.map(p => p.text).join('\n') })), ...(latest ? [latest] : [])];
-        for (const key of ['model', 'audience', 'scenario', 'goal', 'platform', 'requirements', 'include_price', 'image_count', 'content_flow', 'scenario_candidates']) {
+        for (const key of ['model', 'audience', 'scenario', 'goal', 'platform', 'requirements', 'include_price', 'image_count', 'content_flow', 'scenario_candidates', 'trend_selection']) {
           if (session.task?.[key] !== undefined) body[key] = session.task[key];
         }
         body.last_artifact = session.artifact;
         body.conversation_mode = session.conversation_mode;
       }
       if (session?.task) {
-        for (const key of ['model', 'audience', 'scenario', 'goal', 'platform', 'requirements', 'include_price', 'image_count', 'content_flow', 'scenario_candidates']) {
+        for (const key of ['model', 'audience', 'scenario', 'goal', 'platform', 'requirements', 'include_price', 'image_count', 'content_flow', 'scenario_candidates', 'trend_selection']) {
           if (body[key] === undefined && session.task[key] !== undefined) body[key] = session.task[key];
         }
       }
@@ -117,9 +118,40 @@ async function route(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   const method = request.method || 'GET';
   const id = requestId();
-  const tracked = method !== 'GET';
+  const tracked = method !== 'GET' || url.pathname === '/api/v1/trends';
   const execute = async () => {
   try {
+    if (method === 'POST' && url.pathname === '/api/v1/inspirations') {
+      const body = await readJson(request);
+      if (!['weibo', 'xiaohongshu', 'wechat', 'wechat_moments', 'douyin', 'bilibili'].includes(body.platform)) return sendJson(response, 400, { message: '请选择支持的创作平台', request_id: id });
+      const session = body.session_id ? sessionStore.get(body.session_id) : null;
+      if (body.session_id && !session) return sendJson(response, 404, { message: '会话不存在', request_id: id });
+      const task = { ...(session?.task || body.task || {}), platform: body.platform };
+      const result = await require('./services/creativeInspiration.cjs').discover(task, { query: body.query });
+      return sendJson(response, 200, { ...result, request_id: id, log_url: `/api/v1/runs/${id}` });
+    }
+    if (method === 'POST' && url.pathname === '/api/v1/inspirations/select') {
+      const body = await readJson(request);
+      const session = body.session_id ? sessionStore.get(body.session_id) : null;
+      if (!session) return sendJson(response, 404, { message: '会话不存在', request_id: id });
+      const selection = require('./services/creativeInspiration.cjs').choose(body.discovery_id, body.item_id, session.task || {});
+      if (!selection) return sendJson(response, 409, { message: '灵感已过期或创作需求已变化，请重新搜索', request_id: id });
+      sessionStore.update(session.id, { task: { ...(session.task || {}), platform: selection.platform, trend_selection: selection } });
+      return sendJson(response, 200, { selection, request_id: id });
+    }
+    if (method === 'POST' && url.pathname === '/api/v1/trends/recommendations') {
+      const body = await readJson(request);
+      const platform = body.platform;
+      if (!['weibo', 'xiaohongshu'].includes(platform)) return sendJson(response, 400, { message: '不支持的平台', request_id: id });
+      const result = await require('./services/trendRecommendation.cjs').recommendTrends(body.task || {}, await trends.get(platform));
+      return sendJson(response, 200, { ...result, platform, request_id: id, log_url: `/api/v1/runs/${id}` });
+    }
+    if (method === 'GET' && url.pathname === '/api/v1/trends') {
+      const platform = url.searchParams.get('platform');
+      if (!['weibo', 'xiaohongshu'].includes(platform)) return sendJson(response, 400, { code: 'INVALID_PLATFORM', message: 'platform 仅支持 weibo 或 xiaohongshu', request_id: id });
+      const result = await trends.get(platform);
+      return sendJson(response, result.status === 'unavailable' ? 503 : 200, { ...result, platform, request_id: id, log_url: `/api/v1/runs/${id}` });
+    }
     if (method === 'GET' && url.pathname === '/api/v1/runs') return sendJson(response, 200, { items: traceStore.list(Object.fromEntries(url.searchParams)) });
     if (method === 'GET' && url.pathname === '/api/v1/sessions') return sendJson(response, 200, { items: sessionStore.list().map(sessionWithJob).map(session => session.conversation_mode === 'customer' || !session.task ? session : { ...session, title: titleFor(session, {}) }) });
     const jobMatch = url.pathname.match(/^\/api\/v1\/generation-jobs\/(req_[a-zA-Z0-9_]+)(\/cancel)?$/);

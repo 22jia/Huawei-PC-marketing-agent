@@ -11,6 +11,7 @@ import { MarkdownContent } from './components/MarkdownContent';
 import { KnowledgeNavigationContext } from './lib/knowledgeNavigation';
 import { creativeArticle, creativeReport } from './lib/creativeArticle';
 import { ArticleDeliveryTools } from './components/ArticleDeliveryTools';
+import { TrendPicker } from './components/TrendPicker';
 import { ModelRunStatus } from './components/ModelRunStatus';
 import { formatGenerationError } from './lib/generationError';
 import { StorePricePlanner } from './components/StorePricePlanner';
@@ -124,6 +125,7 @@ function MarketingWorkbench({ messageApi, sessionId, sessionData, onSessionUpdat
   const taskRef = useRef(sessionData?.task || {});
   const [result, setResult] = useState(sessionData?.result?.content ? sessionData.result : null);
   const [runResult, setRunResult] = useState(null);
+  const [trendSelection, setTrendSelection] = useState(sessionData?.result?.trend_selection || null);
   const artifactRef = useRef(sessionData?.artifact || null);
   const sessionUpdatedRef = useRef(onSessionUpdated);
   sessionUpdatedRef.current = onSessionUpdated;
@@ -163,6 +165,7 @@ function MarketingWorkbench({ messageApi, sessionId, sessionData, onSessionUpdat
       });
     },
     onResult(data) {
+      setTrendSelection(data.trend_selection || null);
       sessionUpdatedRef.current?.();
       setQuickReplies(data.status === 'needs_clarification' ? data.task?.questions?.[0]?.options || [] : data.quick_replies || []);
       setProgress(previous => ({ ...previous, request_id: data.request_id, label: ['needs_confirmation', 'needs_clarification'].includes(data.status) ? '等待你的补充或决定' : '处理完成', finishedAt: Date.now() }));
@@ -225,7 +228,7 @@ function MarketingWorkbench({ messageApi, sessionId, sessionData, onSessionUpdat
     if (lastAssistant) lastAssistant.content = [{ type: 'text', text: creativeReport(sessionData.result) }];
   }
   return <div className="studio-workbench conversation-workbench"><CreativeThread adapter={adapter} initialMessages={initialMessages} quickReplies={quickReplies} onQuickReply={() => setQuickReplies([])}>{(runtime) => <>
-    <div className="conversation-toolbar"><div><span className="live-dot" /> 助手对话 <span className="toolbar-subtitle">/ 内容与客户支持</span></div><Space wrap><RunLogs requestId={runResult?.request_id || progress?.request_id} /><ArticleDeliveryTools result={result} />{result?.content && <StudioButton variant="ghost" onClick={copy}><CopyOutlined /> 复制</StudioButton>}<StudioButton variant="outline" onClick={() => setEvidenceOpen(true)}><BookOpen size={14} /> 来源与核验 {result?.facts?.length || 0}</StudioButton>{backgroundActive && <Button size="small" onClick={async () => { await fetch(`/api/v1/generation-jobs/${backgroundJob.request_id}/cancel`, { method: 'POST' }); }}>停止任务</Button>}</Space></div>
+    <div className="conversation-toolbar"><div><span className="live-dot" /> 助手对话 <span className="toolbar-subtitle">/ 内容与客户支持</span></div><Space wrap><RunLogs requestId={runResult?.request_id || progress?.request_id} /><TrendPicker sessionId={sessionId} task={taskRef.current} selection={trendSelection} platform={taskRef.current.platform} disabled={busy || backgroundActive} onChoose={(text, selection) => { if (selection) taskRef.current = { ...taskRef.current, platform: selection.platform, trend_selection: selection }; setTrendSelection(null); setQuickReplies([]); runtime.thread.append({ role: 'user', content: [{ type: 'text', text }], startRun: true }); }} /><ArticleDeliveryTools result={result} />{result?.content && <StudioButton variant="ghost" onClick={copy}><CopyOutlined /> 复制</StudioButton>}<StudioButton variant="outline" onClick={() => setEvidenceOpen(true)}><BookOpen size={14} /> 来源与核验 {result?.facts?.length || 0}</StudioButton>{backgroundActive && <Button size="small" onClick={async () => { await fetch(`/api/v1/generation-jobs/${backgroundJob.request_id}/cancel`, { method: 'POST' }); }}>停止任务</Button>}</Space></div>
     {!busy && backgroundJob?.result?.code === 'RUN_INTERRUPTED' && <Alert type="warning" showIcon message={backgroundJob.result.message} />}
     {result?.warnings?.some(warning => /图片生成未完成|图片生成子 Agent/.test(warning)) && <Alert type="warning" showIcon message="本次 AI 生图未完成，当前使用官方原图" description={result.warnings.filter(warning => /图片生成未完成|图片生成子 Agent/.test(warning)).join('；')} />}
   </>}</CreativeThread><Drawer title="来源与核验" open={evidenceOpen} onClose={() => setEvidenceOpen(false)} width={480}><p>核对产品依据后，再发布你的内容。</p>{result ? <><Tag color={result.validation?.status === 'pass' ? 'success' : 'warning'}>{result.validation?.status === 'pass' ? '基础规则检查通过' : '需要人工核对'}</Tag><List dataSource={result.facts || []} locale={{emptyText:'当前没有可引用的产品来源'}} renderItem={(item) => <List.Item><div><Text strong>{item.title}</Text><p>{item.source_path}</p></div></List.Item>} />{result.warnings?.length > 0 && <Alert type="warning" showIcon message="发布前确认" description={result.warnings.join('；')} />}<p className="muted">{result.generation_mode === 'llm' ? '本次由模型生成' : '尚未生成，等待补充信息'}</p></> : <Empty description="生成文案后，来源会显示在这里" />}</Drawer></div>;

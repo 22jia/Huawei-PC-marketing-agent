@@ -1,0 +1,43 @@
+.platform-preview-hint { color: #888; font-size: 12px; margin: 0 0 16px; }
+.publication-stage { background: #f3f3f4; padding: 24px 16px; border-radius: 12px; }
+.publication { max-width: 420px; margin: auto; background: white; border: 1px solid #e8e8eb; border-radius: 18px; overflow: hidden; color: #222; box-shadow: 0 8px 28px #00000008; }
+.publication-nav { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; border-bottom: 1px solid #f4f4f4; }
+.publication-author { display: flex; align-items: center; gap: 10px; padding: 14px 18px; font-size: 13px; }
+.publication-author > svg { margin-left: auto; color: #888; }
+.publication-avatar { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; color: #a45d50; background: #f5e9e3; }
+.publication-author small { display: block; font-size: 10px; color: #999; margin-top: 2px; }
+.publication-gallery { position: relative; background: #f5f5f5; aspect-ratio: 3 / 4; }
+.publication-gallery > img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.publication-count, .publication-ai { position: absolute; color: white; background: #0008; border-radius: 12px; padding: 3px 9px; font-size: 11px; }
+.publication-count { right: 12px; top: 12px; }
+.publication-ai { bottom: 10px; left: 10px; }
+.publication-gallery > button { position: absolute; top: 47%; border: none; border-radius: 50%; background: #ffffffe6; width: 30px; height: 30px; cursor: pointer; display: grid; place-items: center; }
+.publication-gallery > button:disabled { opacity: .25; cursor: default; }
+.publication-previous { left: 10px; }.publication-next { right: 10px; }
+.publication-dots { display: flex; justify-content: center; gap: 6px; padding-top: 12px; }
+.publication-dots button { padding: 0; width: 6px; height: 6px; border: 0; border-radius: 50%; background: #ddd; cursor: pointer; }
+.publication-dots button[aria-current] { background: #ed4054; }
+.publication-copy { padding: 18px 20px 22px; overflow-wrap: anywhere; }
+.publication-copy h2 { font-size: 19px; line-height: 1.5; margin: 0 0 12px; font-weight: 650; }
+.publication-copy .markdown-content { font-size: 15px; line-height: 1.85; color: #333; }
+.publication-copy .markdown-content p { margin: 0 0 16px; }
+.publication-copy .markdown-content img { width: 100%; height: auto; border-radius: 3px; }
+.publication-copy .publication-tags { color: #315b82; font-size: 14px; line-height: 1.8; margin: 14px 0 0; }
+.publication-actions { display: flex; align-items: center; gap: 20px; padding: 14px 18px; border-top: 1px solid #eee; color: #555; }
+.publication-actions span { flex: 1; padding: 7px 12px; background: #f6f6f6; color: #999; border-radius: 20px; font-size: 12px; }
+.publication-wechat, .publication-article { max-width: 600px; border-radius: 4px; }
+.publication-wechat .publication-copy { padding: 30px 25px; }
+.publication-wechat .publication-copy h2 { font-size: 24px; font-weight: 600; line-height: 1.5; }
+.publication-wechat .markdown-content { font-size: 16px; line-height: 2; letter-spacing: .4px; }
+.publication-article-meta { color: #969696; font-size: 12px; margin: 0 0 26px; }
+.publication-article-meta span { color: #597da2; background: #f2f5f8; padding: 2px 5px; margin-right: 5px; }
+.publication-wechat_moments { border-radius: 4px; }.publication-wechat_moments .publication-copy { padding-top: 0; }
+.publication-wechat_moments .publication-copy h2 { font-size: 16px; }
+.publication-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 14px; }
+.publication-grid > div { position: relative; aspect-ratio: 1; overflow: hidden; background: #f5f5f5; }
+.publication-grid img { width: 100%; height: 100%; object-fit: cover; }
+.publication-grid .publication-ai { font-size: 9px; padding: 1px 4px; left: 3px; bottom: 3px; }
+.publication-image-missing { display: grid; place-items: center; height: 100%; color: #999; font-size: 13px; }
+.publication-douyin .publication-gallery { aspect-ratio: 9 / 16; }
+.publication-bilibili .publication-gallery { aspect-ratio: 4 / 3; }
+@media (max-width: 520px) { .publication-stage { padding: 10px 0; background: transparent; }.publication-copy { padding: 16px; }.publication-wechat .publication-copy { padding: 22px 18px; } }

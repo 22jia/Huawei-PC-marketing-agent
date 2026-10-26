@@ -15,6 +15,8 @@ const PLATFORMS = require('./platformStrategies.cjs');
 const { loadCopywritingSkill } = require('./copywritingSkill.cjs');
 const { resolveContentCitations } = require('./contentCitations.cjs');
 const { bindProductIdentity } = require('./productIdentity.cjs');
+const { applyTrendChoice, offerTrends } = require('../services/trendSelection.cjs');
+const trendService = require('../services/platformTrends.cjs').createTrendService({ log: event });
 
 function inferExplicitFields(task) {
   if (!task.history.length) return task;
@@ -50,6 +52,7 @@ function analyzeTask(input = {}) {
     visual_brief: typeof input.visual_brief === 'string' ? input.visual_brief.slice(0, 4000) : '',
     output_type: input.output_type === 'image' ? 'image' : 'article',
     platform: input.platform || '',
+    trend_selection: input.trend_selection && typeof input.trend_selection === 'object' ? structuredClone(input.trend_selection) : null,
     model: input.model || '',
     content_flow: input.content_flow || '',
     scenario_candidates: Array.isArray(input.scenario_candidates) ? input.scenario_candidates.slice(0, 5) : [],
@@ -186,12 +189,13 @@ async function generate(input, options = {}) {
     catch (error) { progress('grounding', 'failed'); throw error; }
   };
   let task = analyzeTask(input);
+  const trendChoice = applyTrendChoice(task);
   if (task.need_clarification && !task.history.some((m) => m.role === 'user')) return { status: 'needs_clarification', task };
   const savedSelection = applyScenarioSelection(task);
   if (savedSelection && !savedSelection.confirmed) return savedSelection;
   task = analyzeTask(task);
   // A completed choice already defines the next action. Keep extra instructions on the normal planner path.
-  const directSelection = savedSelection?.pureChoice && !task.need_clarification;
+  const directSelection = (savedSelection?.pureChoice || trendChoice) && !task.need_clarification;
   const planned = directSelection ? {
     value: { intent: 'generate', needs_evidence: true, task_updates: {}, needs: [], concerns: [], buying_stage: '', summary: task.goal, retrieval_queries: [task.model] },
     meta: { status: 'success', source: 'confirmed_product_selection' },
@@ -279,8 +283,23 @@ async function generate(input, options = {}) {
     const field = valid ? proposed.field : ['model', 'audience', 'platform', 'scenario', 'goal'].find(key => task.missing_fields.includes(key));
     const question = { field, question: valid ? proposed.question.trim() : fallback[field] };
     if (valid && Array.isArray(proposed.options)) question.options = proposed.options.filter(option => typeof option === 'string' && option.trim()).slice(0, 4);
+    if (field === 'platform') {
+      const descriptions = {
+        xiaohongshu: '小红书：分享一种生活经验或姿态，让读者认出自己的偏好',
+        wechat: '微信公众号：提出一个判断或论点，用理由和事实展开解释',
+        wechat_moments: '微信朋友圈：短文配图，面向熟人和已有客户',
+        weibo: '微博：简短图文与公共话题，便于转发互动',
+        douyin: '抖音：竖版图卡，逐张浏览、简短表达',
+        bilibili: '哔哩哔哩：专栏图文，适合详细解释和讨论',
+      };
+      const labels = { 小红书: 'xiaohongshu', 微信公众号: 'wechat', 公众号: 'wechat', 微信朋友圈: 'wechat_moments', 朋友圈: 'wechat_moments', 微博: 'weibo', 抖音: 'douyin', 哔哩哔哩: 'bilibili', B站: 'bilibili' };
+      const ids = [...new Set((question.options || []).map(option => Object.keys(labels).find(label => option.startsWith(label))).filter(Boolean).map(label => labels[label]))];
+      question.options = (ids.length >= 2 ? ids : ['xiaohongshu', 'wechat', 'wechat_moments', 'weibo']).map(id => descriptions[id]);
+    }
     return { status: 'needs_clarification', generation_mode: 'not_generated', reply: question.question, task: { ...task, questions: [question] }, llm: { status: 'needs_clarification', stages: [{ stage: 'analysis', ...planned.meta }] } };
   }
+  const trendOffer = await offerTrends(task, options.getTrends || (platform => trendService.get(platform)), { requestJson: options.recommendTrendsJson, signal: options.signal, discover: options.discoverInspiration || require('../services/creativeInspiration.cjs').discover });
+  if (trendOffer) return trendOffer;
   const retrieved = await call('retrieval', () => collectEvidence(task, planned.value, options), { task, queries: planned.value.retrieval_queries });
   if (retrieved.ambiguous_model) return { status: 'needs_clarification', generation_mode: 'not_generated', reply: '知识库找到多个相近版本，请选择本次要介绍的型号：', task: { ...task, questions: [{ field: 'model', question: '请确认产品版本', options: retrieved.model_candidates || [] }] }, llm: { status: 'needs_clarification', stages: [{ stage: 'analysis', ...planned.meta }] } };
   const usableEvidence = retrieved.evidence.filter((item) => item.retrievable !== false && item.content);

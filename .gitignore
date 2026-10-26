@@ -23,4 +23,5 @@ tmp_knowledgebase/
 data/run-logs/
 data/generation-jobs/
 data/sessions/
+data/platform-trends/
 services/api/data/tickets.json
