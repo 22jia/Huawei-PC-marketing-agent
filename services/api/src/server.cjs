@@ -252,52 +252,11 @@ async function route(request, response) {
     }
     if (url.pathname === '/api/v1/knowledge/list') {
       return sendJson(response, 200, { request_id: id, ...localKnowledgeBrowser.list(body.folder_id || localKnowledgeBrowser.ROOT_ID) });
-      /* Legacy remote listing retained below for migration reference only. */
-      const knowledgeBase = await require('./clients/imaClient.cjs').findKnowledgeBase(body.knowledge_base_name || '任德耀新建华为PC知识库');
-      const imaClient = require('./clients/imaClient.cjs');
-      let result = await imaClient.listKnowledge(knowledgeBase.id, body.folder_id, body.cursor || '', Math.min(Number(body.limit) || 50, 50));
-      // IMA represents the root as a same-named folder. Expand it so the
-      // browser opens directly at the user's meaningful category level.
-      if (!body.folder_id && result.knowledge_list?.length === 1 && result.knowledge_list[0].media_type === 99) {
-        result = await imaClient.listKnowledge(knowledgeBase.id, result.knowledge_list[0].media_id, '', Math.min(Number(body.limit) || 50, 50));
-      }
-      return sendJson(response, 200, {
-        request_id: id,
-        knowledge_base: knowledgeBase.name,
-        folder: body.folder_id || null,
-        items: (result.knowledge_list || []).map(({ media_id, title, media_type, parent_folder_id, tags }) => ({
-          id: media_id,
-          title,
-          media_type,
-          kind: media_type === 99 ? 'folder' : 'file',
-          parent_folder_id,
-          tags: tags || [],
-        })),
-        current_path: result.current_path || [],
-        next_cursor: result.next_cursor || '',
-        is_end: Boolean(result.is_end),
-      });
     }
     if (url.pathname === '/api/v1/knowledge/item') {
       if (!body.media_id) return sendJson(response, 400, { status: 'error', code: 'MISSING_REQUIRED_FIELD', message: '缺少 media_id 字段', request_id: id });
-      if (String(body.media_id).startsWith('local:')) {
-        return sendJson(response, 200, { request_id: id, item: localKnowledgeBrowser.readItem(body.media_id, body.title) });
-      }
-      const ima = require('./clients/imaClient.cjs');
-      const info = await ima.getMediaInfo(body.media_id);
-      let content = '';
-      let content_warning = '';
-      try { content = await ima.fetchSourceText(info); } catch (error) { content_warning = error.message; }
-      return sendJson(response, 200, {
-        request_id: id,
-        item: {
-          title: body.title || info.title || '知识条目',
-          media_type: body.media_type,
-          content: content.slice(0, 30000),
-          source_url: info.url_info?.url || '',
-          content_warning,
-        },
-      });
+      if (!String(body.media_id).startsWith('local:')) return sendJson(response, 404, { status: 'error', code: 'KNOWLEDGE_ITEM_NOT_FOUND', message: '知识条目不存在', request_id: id });
+      return sendJson(response, 200, { request_id: id, item: localKnowledgeBrowser.readItem(body.media_id, body.title) });
     }
     if (url.pathname === '/api/v1/generate') {
       if (body.background === true) {

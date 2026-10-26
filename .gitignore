@@ -25,3 +25,12 @@ data/generation-jobs/
 data/sessions/
 data/platform-trends/
 services/api/data/tickets.json
+
+# Duplicate archives and internal review artifacts
+华为PC知识库.zip
+华为·产业进阶赛道·赛题手册v4.pdf
+说明书.docx
+项目说明书-更新版.pdf
+ima-skill/.history/
+docs/superpowers/
+artifacts/
